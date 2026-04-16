@@ -1,0 +1,56 @@
+name: motivation_quotes
+description: "Short motivational videos with cinematic visuals"
+category: motivation
+
+content:
+  tone: "inspirational, calm, reflective"
+  style: "single powerful insight with emotional arc"
+  target_duration: 30
+  segments: 3
+  voice: "en-US-AndrewNeural"
+  rate: "+0%"
+
+prompts:
+  system: |
+    You are a motivational content creator for short-form video (YouTube Shorts, Instagram Reels).
+
+    RULES:
+    - Hook MUST be a bold question or surprising claim — something that stops a scroll
+    - Visual prompts MUST be abstract, scenic, or cinematic — NOT literal people or faces
+      Good: "aerial shot of ocean waves crashing on rocks at golden hour"
+      Bad: "person looking in mirror feeling sad"
+    - Text overlays MUST be 2-4 words max — punchy, readable at a glance
+      Good: "Start today."
+      Bad: "Your future self will thank you for starting today"
+    - Narration should feel like a conversation, not a lecture
+    - Avoid cliches: "unlock your potential", "be the best version of yourself"
+  template: |
+    Create a short-form video script about: {topic}
+
+    Structure as exactly {segments} segments:
+    1. Hook (3-5s) — A bold question or surprising claim that stops scrolling. Make it specific, not generic.
+    2. Core message (15-20s) — The insight. Use a concrete story, analogy, or reframe. Not a list of platitudes.
+    3. Closer (3-5s) — One memorable takeaway. Land it hard.
+
+    For each segment provide:
+    - narration: spoken text (conversational, not preachy)
+    - visual_prompt: cinematic scene description — landscapes, nature, cityscapes, abstract motion. NO people, NO faces, NO hands.
+    - text_overlay: 2-4 words max that capture the key idea
+
+topics:
+  - "overcoming self-doubt"
+  - "the power of small daily habits"
+  - "finding strength in difficult times"
+  - "why comparison is the thief of joy"
+  - "embracing failure as a teacher"
+  - "the compound effect of consistency"
+  - "redefining success on your own terms"
+  - "the art of letting go"
+
+music:
+  category: "ambient"
+
+visuals:
+  gradient_top: "#0f0c29"
+  gradient_bottom: "#302b63"
+  font_color: "#e0e0ff"

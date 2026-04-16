@@ -1,0 +1,48 @@
+# Short-form video generation defaults
+
+llm:
+  model: "claude-sonnet-4-20250514"
+  max_tokens: 2048
+  temperature: 0.8
+
+tts:
+  voice: "en-US-AriaNeural"
+  rate: "+5%"
+  volume: "+0%"
+  output_format: "audio-24khz-96kbitrate-mono-mp3"
+
+video:
+  width: 1080
+  height: 1920
+  fps: 30
+  video_bitrate: "8M"
+  audio_bitrate: "192k"
+  audio_sample_rate: 44100
+  codec: "libx264"
+  pixel_format: "yuv420p"
+  preset: "medium"
+  min_duration: 15
+  max_duration: 60
+
+visuals:
+  font_size: 64
+  font_color: "#FFFFFF"
+  text_margin: 80
+  gradient_top: "#1a1a2e"
+  gradient_bottom: "#16213e"
+  ken_burns_zoom: 1.05
+  crossfade_duration: 0.3
+
+music:
+  enabled: true
+  music_dir: "data/music"
+  volume: 0.15
+  duck_volume: 0.08
+  fade_in: 0.5
+  fade_out: 1.0
+
+paths:
+  data_dir: "data"
+  videos_dir: "data/videos"
+  assets_dir: "data/assets"
+  db_path: "data/shortform.db"

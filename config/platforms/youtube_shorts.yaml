@@ -1,0 +1,24 @@
+name: youtube_shorts
+display_name: "YouTube Shorts"
+
+encoding:
+  width: 1080
+  height: 1920
+  fps: 30
+  video_bitrate: "8M"
+  audio_bitrate: "192k"
+  codec: "libx264"
+  pixel_format: "yuv420p"
+  preset: "medium"
+  container: "mp4"
+
+limits:
+  max_duration: 60
+  min_duration: 15
+  max_file_size_mb: 256
+
+metadata:
+  category: "22"  # People & Blogs
+  privacy_status: "public"
+  made_for_kids: false
+  default_language: "en"

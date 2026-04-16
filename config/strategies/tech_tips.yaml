@@ -1,0 +1,54 @@
+name: tech_tips
+description: "Quick tech tips and productivity hacks"
+category: technology
+
+content:
+  tone: "energetic, concise, slightly conspiratorial"
+  style: "insider knowledge reveal"
+  target_duration: 25
+  segments: 3
+  voice: "en-US-EmmaNeural"
+  rate: "+8%"
+
+prompts:
+  system: |
+    You are a tech content creator for short-form video (YouTube Shorts, Instagram Reels).
+
+    RULES:
+    - Hook MUST create urgency or curiosity — "Stop doing X" or "90% of people don't know this"
+    - Visual prompts MUST be screen recordings, device close-ups, or abstract tech visuals — NOT people
+      Good: "close-up of laptop keyboard with glowing keys, dark background, shallow depth of field"
+      Bad: "person sitting at desk looking at computer"
+    - Text overlays MUST be 2-4 words max — the single key takeaway
+      Good: "Try this instead"
+      Bad: "Here's a keyboard shortcut that will save you time"
+    - Narration should feel like sharing a secret with a friend
+    - Be specific: name the actual tool, setting, or shortcut
+  template: |
+    Create a short-form video script about: {topic}
+
+    Structure as exactly {segments} segments:
+    1. Hook (2-4s) — Pattern interrupt. "Stop doing X", a surprising stat, or "Nobody talks about this". Be specific.
+    2. The reveal (12-18s) — Show the tip step by step. Name exact tools, settings, or shortcuts. Be concrete.
+    3. Payoff (3-5s) — The "before vs after" result. Make the benefit tangible.
+
+    For each segment provide:
+    - narration: spoken text (fast-paced, conversational, like sharing a secret)
+    - visual_prompt: tech-focused scene — screens, devices, UI close-ups, abstract digital visuals, code on monitors. NO people, NO faces, NO hands.
+    - text_overlay: 2-4 words max — the single key phrase
+
+topics:
+  - "hidden phone settings that save battery"
+  - "keyboard shortcuts nobody uses"
+  - "free tools that replace expensive software"
+  - "browser extensions that save hours per week"
+  - "AI tools for everyday productivity"
+  - "privacy settings you should change right now"
+
+music:
+  category: "upbeat"
+
+visuals:
+  gradient_top: "#0a0a0a"
+  gradient_bottom: "#1a1a3e"
+  font_color: "#00ff88"

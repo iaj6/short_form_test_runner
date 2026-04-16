@@ -1,0 +1,22 @@
+name: instagram_reels
+display_name: "Instagram Reels"
+
+encoding:
+  width: 1080
+  height: 1920
+  fps: 30
+  video_bitrate: "8M"
+  audio_bitrate: "192k"
+  codec: "libx264"
+  pixel_format: "yuv420p"
+  preset: "medium"
+  container: "mp4"
+
+limits:
+  max_duration: 60
+  min_duration: 3
+  max_file_size_mb: 100
+
+metadata:
+  media_type: "REELS"
+  share_to_feed: true
