@@ -125,3 +125,75 @@ async def test_veo_calls_api_with_correct_params(tmp_path: Path):
     assert output.output_type == VisualOutputType.VIDEO
     assert output.path.suffix == ".mp4"
     mock_client.models.generate_videos.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_veo_uses_reference_image_when_present(tmp_path: Path):
+    """When config provides a reference_image that exists, Veo animates that
+    image directly — no Pillow gradient is generated."""
+    backend = VeoBackend(api_key="test-key")
+    segment = Segment(
+        index=0, narration="Test", visual_prompt="dim study", text_overlay=""
+    )
+
+    # Create a real reference image file on disk
+    ref_image = tmp_path / "bartholomew_hero.png"
+    # Use Pillow to generate a real PNG (Veo SDK loads it via types.Image.from_file)
+    from PIL import Image
+    Image.new("RGB", (1080, 1920), (10, 8, 8)).save(ref_image)
+
+    captured: dict = {}
+
+    async def fake_generate_video(
+        api_key, model, image_path, prompt, output_path, seed=None, negative_prompt=None
+    ):
+        captured["image_path"] = image_path
+        captured["seed"] = seed
+        captured["negative_prompt"] = negative_prompt
+        Path(output_path).write_bytes(b"fake-mp4")
+
+    with patch("shortform.visuals.veo_backend._generate_video", side_effect=fake_generate_video):
+        with patch("shortform.visuals.veo_backend.PillowBackend") as MockPillow:
+            await backend.generate(
+                segment=segment,
+                output_path=tmp_path / "seg",
+                width=1080,
+                height=1920,
+                config={
+                    "reference_image": str(ref_image),
+                    "veo_seed": 314159,
+                    "veo_negative_prompt": "people, faces, modern clothes",
+                },
+            )
+
+            MockPillow.assert_not_called()  # reference image used directly
+
+    assert captured["image_path"] == ref_image
+    assert captured["seed"] == 314159
+    assert captured["negative_prompt"] == "people, faces, modern clothes"
+
+
+@pytest.mark.asyncio
+async def test_veo_falls_back_to_pillow_when_reference_image_missing(tmp_path: Path):
+    """When reference_image path is set but the file doesn't exist, log a
+    warning and fall back to Pillow gradient (don't crash the pipeline)."""
+    backend = VeoBackend(api_key="test-key")
+    segment = Segment(
+        index=0, narration="Test", visual_prompt="bg", text_overlay=""
+    )
+
+    async def fake_generate_video(*args, **kwargs):
+        Path(kwargs["output_path"]).write_bytes(b"fake-mp4")
+
+    with patch("shortform.visuals.veo_backend._generate_video", side_effect=fake_generate_video):
+        output = await backend.generate(
+            segment=segment,
+            output_path=tmp_path / "seg",
+            width=1080,
+            height=1920,
+            config={"reference_image": str(tmp_path / "does_not_exist.png")},
+        )
+
+    # Pillow gradient base frame should have been written alongside the mp4
+    assert (tmp_path / "seg.png").exists()
+    assert output.output_type == VisualOutputType.VIDEO
