@@ -46,7 +46,8 @@
 
 tracks:
   - file: victorian_gothic_piano.mp3
-    title: "One Thousand Years Ago"
+    title: "One Thousand Years Ago (Victorian Gothic Piano)"
+    composer: "joelfazhari"
     source: pixabay
     url: "https://pixabay.com/music/modern-classical-one-thousand-years-ago-victorian-gothic-piano-music-loopable-241137/"
     license: pixabay
@@ -58,7 +59,8 @@ tracks:
     notes: "Workhorse Victorian piano — safe default for contemplative vignettes (applications, news, reflection)."
 
   - file: ambient_melancholic.mp3
-    title: "Ambient Melancholic Background"
+    title: "Eclipse"
+    composer: "Universfield"
     source: pixabay
     url: "https://pixabay.com/music/ambient-ambient-melancholic-background-preview-304515/"
     license: pixabay
@@ -67,10 +69,11 @@ tracks:
     tempo: slow
     intensity: low
     loopable: true
-    notes: "Quiet ambient pad — good for the more interior / existential vignettes."
+    notes: "Quiet ambient pad — good for the more interior / existential vignettes. (Pixabay title shown as 'Eclipse' on download; URL slug is the older 'ambient-melancholic-background' name.)"
 
   - file: melancholic_soundscape.mp3
     title: "Melancholic Soundscape"
+    composer: "Universfield"
     source: pixabay
     url: "https://pixabay.com/music/ambient-melancholic-soundscape-276673/"
     license: pixabay
@@ -85,18 +88,20 @@ tracks:
     title: "Industrial Music Box"
     composer: "Kevin MacLeod"
     source: incompetech
-    url: "https://incompetech.com/music/royalty-free/index.html"
-    license: cc_by_4_0
+    url: "https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1100812"
+    license: cc_by_3_0
     attribution_required: true
-    attribution_text: "\"Industrial Music Box\" Kevin MacLeod (incompetech.com). Licensed under Creative Commons: By Attribution 4.0 — http://creativecommons.org/licenses/by/4.0/"
+    attribution_text: "\"Industrial Music Box\" Kevin MacLeod (incompetech.com). Licensed under Creative Commons: By Attribution 3.0 — http://creativecommons.org/licenses/by/3.0/"
     mood: [music_box, spooky, mechanical, burton, gothic, minor_key]
     tempo: slow
     intensity: medium
     loopable: false
-    notes: "The most on-brand track we found — signature Burton-adjacent texture. Worth the attribution cost. When publishing automation lands, append attribution_text to the video description."
+    duration_seconds: 102
+    notes: "The most on-brand track — signature Burton-adjacent texture. Worth the attribution cost. When publishing automation lands, append attribution_text to the video description. Download: click the download button on the incompetech URL above."
 
   - file: dark_music_box.mp3
-    title: "Dark Music Box Tension"
+    title: "Tension Music Box"
+    composer: "Universfield"
     source: pixabay
     url: "https://pixabay.com/music/search/creepy%20music%20box/"
     license: pixabay
@@ -105,16 +110,17 @@ tracks:
     tempo: slow
     intensity: medium
     loopable: true
-    notes: "Placeholder — pick any Pixabay creepy-music-box track that lands. Use for darker/more absurd vignettes where you want Burton energy without the attribution."
+    notes: "Universfield's 'Tension Music Box' (Pixabay ID 208294). Darker/more absurd vignettes where you want Burton energy without the attribution."
 
   - file: clockwork_steampunk.mp3
-    title: "Clockwork Steampunk"
+    title: "Clockwork Adventure Steampunk"
+    composer: "Luis Humanoide"
     source: pixabay
     url: "https://pixabay.com/music/search/clockwork/"
     license: pixabay
     attribution_required: false
-    mood: [mechanical, clockwork, cinematic, victorian]
+    mood: [mechanical, clockwork, cinematic, victorian, steampunk]
     tempo: medium
     intensity: medium
     loopable: true
-    notes: "Placeholder — pick any Pixabay clockwork track that fits. Texture for desk / laptop / bill-sorting scenes."
+    notes: "Luis Humanoide's 'Clockwork Adventure Steampunk' (Pixabay ID 288524). Texture for desk / laptop / bill-sorting scenes. Slightly more 'adventurous' than other tracks — save for vignettes with more action."
