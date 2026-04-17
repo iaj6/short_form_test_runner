@@ -16,10 +16,17 @@ venv/
 data/videos/
 data/assets/
 data/models/
-data/music/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+
+# Music: ignore audio files (large, licensed separately per-machine) but TRACK
+# the per-category tracks.yaml manifests so curation + attribution stay in git.
+data/music/**/*.mp3
+data/music/**/*.wav
+data/music/**/*.flac
+data/music/**/*.m4a
+data/music/**/*.ogg
 
 # Character refs: ignore the generated candidates pool, track the locked hero image(s)
 data/character_refs/candidates/

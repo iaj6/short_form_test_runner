@@ -1,0 +1,120 @@
+# Music track manifest — gothic category.
+#
+# PURPOSE
+# A future track-selection pipeline stage will use this manifest to:
+#   - match tracks to vignette mood / tempo / intensity
+#   - auto-include attribution lines in video descriptions when publishing
+#   - avoid reusing the same track in successive videos
+#   - filter by license (e.g., commercial-only publishing to certain platforms)
+#
+# CURRENT STATE
+# The assembly stage in src/shortform/stages/assembly.py still picks randomly
+# from all audio files in this directory. The manifest is ADVISORY until the
+# selector is implemented. It is safe to add entries before that code lands.
+#
+# ADDING A TRACK
+# 1. Download the audio file to this directory (e.g., data/music/gothic/<name>.mp3)
+# 2. Add an entry below with the fields documented in the schema
+# 3. For tracks requiring attribution (CC BY etc.), fill attribution_text
+#    exactly as it should appear in the video description
+#
+# SCHEMA
+#   file                  [required]  filename in this directory
+#   title                 [required]  display title
+#   composer              [optional]  composer / artist name
+#   source                [required]  pixabay | incompetech | fma | youtube_audio | other
+#   url                   [required]  original source URL
+#   license               [required]  pixabay | cc0 | cc_by_4_0 | public_domain | other
+#   attribution_required  [required]  boolean
+#   attribution_text      [conditional] exact attribution string — required when attribution_required is true
+#   mood                  [required]  list of tags for selector matching (see MOOD TAGS below)
+#   tempo                 [required]  slow | medium | fast
+#   intensity             [required]  low | medium | high  (how busy/present the track is under narration)
+#   loopable              [required]  boolean — safe to loop without jarring seam
+#   duration_seconds      [optional]  informational track length
+#   notes                 [optional]  freeform curator notes
+#
+# MOOD TAGS — use multiple per track. Current vocabulary:
+#   victorian, gothic, piano, melancholic, contemplative, music_box,
+#   spooky, mechanical, clockwork, ambient, orchestral, waltz, burton,
+#   cinematic, soundscape, minor_key
+
+# -----------------------------------------------------------------------------
+# Curated starter set — download from the URLs below and save with these
+# filenames (or edit `file:` to match your chosen filename).
+# -----------------------------------------------------------------------------
+
+tracks:
+  - file: victorian_gothic_piano.mp3
+    title: "One Thousand Years Ago"
+    source: pixabay
+    url: "https://pixabay.com/music/modern-classical-one-thousand-years-ago-victorian-gothic-piano-music-loopable-241137/"
+    license: pixabay
+    attribution_required: false
+    mood: [victorian, gothic, piano, melancholic, contemplative]
+    tempo: slow
+    intensity: low
+    loopable: true
+    notes: "Workhorse Victorian piano — safe default for contemplative vignettes (applications, news, reflection)."
+
+  - file: ambient_melancholic.mp3
+    title: "Ambient Melancholic Background"
+    source: pixabay
+    url: "https://pixabay.com/music/ambient-ambient-melancholic-background-preview-304515/"
+    license: pixabay
+    attribution_required: false
+    mood: [ambient, melancholic, soundscape]
+    tempo: slow
+    intensity: low
+    loopable: true
+    notes: "Quiet ambient pad — good for the more interior / existential vignettes."
+
+  - file: melancholic_soundscape.mp3
+    title: "Melancholic Soundscape"
+    source: pixabay
+    url: "https://pixabay.com/music/ambient-melancholic-soundscape-276673/"
+    license: pixabay
+    attribution_required: false
+    mood: [ambient, melancholic, soundscape, cinematic]
+    tempo: slow
+    intensity: medium
+    loopable: true
+    notes: "More cinematic alternate to ambient_melancholic — slight crescendo for heavier beats."
+
+  - file: industrial_music_box.mp3
+    title: "Industrial Music Box"
+    composer: "Kevin MacLeod"
+    source: incompetech
+    url: "https://incompetech.com/music/royalty-free/index.html"
+    license: cc_by_4_0
+    attribution_required: true
+    attribution_text: "\"Industrial Music Box\" Kevin MacLeod (incompetech.com). Licensed under Creative Commons: By Attribution 4.0 — http://creativecommons.org/licenses/by/4.0/"
+    mood: [music_box, spooky, mechanical, burton, gothic, minor_key]
+    tempo: slow
+    intensity: medium
+    loopable: false
+    notes: "The most on-brand track we found — signature Burton-adjacent texture. Worth the attribution cost. When publishing automation lands, append attribution_text to the video description."
+
+  - file: dark_music_box.mp3
+    title: "Dark Music Box Tension"
+    source: pixabay
+    url: "https://pixabay.com/music/search/creepy%20music%20box/"
+    license: pixabay
+    attribution_required: false
+    mood: [music_box, spooky, gothic, minor_key]
+    tempo: slow
+    intensity: medium
+    loopable: true
+    notes: "Placeholder — pick any Pixabay creepy-music-box track that lands. Use for darker/more absurd vignettes where you want Burton energy without the attribution."
+
+  - file: clockwork_steampunk.mp3
+    title: "Clockwork Steampunk"
+    source: pixabay
+    url: "https://pixabay.com/music/search/clockwork/"
+    license: pixabay
+    attribution_required: false
+    mood: [mechanical, clockwork, cinematic, victorian]
+    tempo: medium
+    intensity: medium
+    loopable: true
+    notes: "Placeholder — pick any Pixabay clockwork track that fits. Texture for desk / laptop / bill-sorting scenes."
