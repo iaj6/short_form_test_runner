@@ -60,12 +60,12 @@ Output reads as "AI short-form" because:
 
 ## Build Order (de-risk hardest thing first)
 
-1. **F5-TTS proof-of-concept** on the M2 Pro spare Mac — biggest unknown. If the cloned theatrical voice doesn't sell the concept, nothing else matters.
-2. Character reference image (Imagen via Gemini API)
-3. `gothic_vignette.yaml` strategy config
-4. Veo backend: reference-image anchoring + seed control
-5. Source gothic/melancholic royalty-free music (new category)
-6. End-to-end test: one full ~30s video
+1. **F5-TTS proof-of-concept** on the M2 Pro spare Mac — biggest unknown. If the cloned theatrical voice doesn't sell the concept, nothing else matters. *(in progress on spare M2 Pro)*
+2. ~~Character reference image (Imagen via Gemini API)~~ **DONE** — locked at `data/character_refs/bartholomew_hero.png`. Generation script lives at `scripts/generate_bartholomew.py` (run with variants `--variant no_hat|wider|closer|standing` for alternate framing). Candidates pool is gitignored.
+3. ~~`gothic_vignette.yaml` strategy config~~ **DONE** — `config/strategies/gothic_vignette.yaml` has system prompt with the six canonical Bartholomew vignettes baked in as few-shot examples, 26 modern-dread topics, Veo reference/seed fields wired.
+4. ~~Veo backend: reference-image anchoring + seed control~~ **DONE** — `src/shortform/visuals/veo_backend.py` reads `reference_image`, `veo_seed`, `veo_negative_prompt` from strategy config. Falls back to Pillow gradient gracefully when reference file missing. Tests in `tests/test_visuals.py`.
+5. **Source gothic/melancholic royalty-free music** (new category) — open. Need to populate `data/music/gothic/` (gitignored) with tracks. Pixabay / Free Music Archive / YouTube Audio Library are good sources for melancholic ambient, music-box, distant strings, clockwork.
+6. **End-to-end test:** one full ~30s video — gated on (1) and (5).
 
 ## Machine Topology
 
