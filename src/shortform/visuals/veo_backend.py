@@ -125,12 +125,28 @@ async def _resolve_base_frame(
 ) -> Path:
     """Pick the still frame Veo will animate.
 
-    Strategy can supply a `reference_image` path for visual identity consistency
-    (same character/setting across every segment). When present and the file
-    exists, that image is used as-is. Otherwise we generate a text-free Pillow
-    gradient — text gets burned on in assembly to avoid Veo garbling rendered
-    text during animation.
+    Priority order:
+    1. `chain_from` — visual_gen sets this on non-first clips of a segment
+       to the last frame of the previous clip, so Veo extends from exactly
+       where the previous clip ended (continuous motion within a segment).
+    2. `reference_image` — strategy-level hero anchor used for clip 0 of
+       every segment so the character/world re-establishes at each cut.
+    3. Pillow gradient fallback — text-free; assembly burns overlays later.
     """
+    chain_from = config.get("chain_from")
+    if chain_from:
+        chain_path = Path(chain_from)
+        if chain_path.exists():
+            logger.info(
+                "Segment %d chaining from previous clip's last frame: %s",
+                segment.index, chain_path.name,
+            )
+            return chain_path
+        logger.warning(
+            "chain_from %s not found — falling back to reference_image",
+            chain_path,
+        )
+
     reference_image = config.get("reference_image")
     if reference_image:
         ref_path = Path(reference_image)

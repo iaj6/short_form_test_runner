@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import math
+import subprocess
+from pathlib import Path
 
 from shortform.models.video import VideoStatus
 from shortform.pipeline.context import PipelineContext
@@ -87,6 +89,13 @@ class VisualGenStage:
 
             # Multi-clip path: if the backend produces video AND the audio is
             # longer than one Veo clip, generate additional clips to cover it.
+            # Within a segment we CHAIN clips by extracting the last frame of
+            # clip M and passing it as the starting image for clip M+1 (via
+            # `chain_from` in config). This makes sub-clip cuts within a
+            # segment continuous — Bartholomew's pose, lighting, and motion
+            # pick up exactly where they left off. The first clip of each
+            # segment re-anchors to the hero reference image so the character
+            # doesn't drift across segments.
             clip_paths: list[str] = [str(first_result.path)]
             if first_result.output_type == VisualOutputType.VIDEO:
                 target_seconds = seg.actual_duration or seg.estimated_duration
@@ -95,15 +104,26 @@ class VisualGenStage:
                 )
                 if n_clips_total > 1:
                     logger.info(
-                        "Segment %d needs %d clips for %.1fs audio",
+                        "Segment %d needs %d clips for %.1fs audio (chained)",
                         seg.index, n_clips_total, target_seconds,
                     )
                 for extra_idx in range(1, n_clips_total):
+                    # Extract last frame of the previous clip, pass it as the
+                    # chain anchor for this clip.
+                    prev_clip = Path(clip_paths[-1])
+                    last_frame = video_dir / (
+                        f"segment_{seg.index:02d}_clip_{extra_idx - 1:02d}_lastframe.png"
+                        if extra_idx > 1
+                        else f"segment_{seg.index:02d}_lastframe.png"
+                    )
+                    _extract_last_frame(prev_clip, last_frame)
+                    chain_config = {**config, "chain_from": str(last_frame)}
+
                     extra_output = (
                         video_dir / f"segment_{seg.index:02d}_clip_{extra_idx:02d}"
                     )
                     logger.info(
-                        "Generating visual for segment %d [%s] (clip %d/%d)",
+                        "Generating visual for segment %d [%s] (clip %d/%d, chained)",
                         seg.index, self._backend.name, extra_idx + 1, n_clips_total,
                     )
                     extra_result = await self._backend.generate(
@@ -111,7 +131,7 @@ class VisualGenStage:
                         output_path=extra_output,
                         width=vid_cfg.width,
                         height=vid_cfg.height,
-                        config=config,
+                        config=chain_config,
                     )
                     clip_paths.append(str(extra_result.path))
 
@@ -141,3 +161,28 @@ class VisualGenStage:
             total_clips, len(ctx.script.segments), self._backend.name,
         )
         return ctx
+
+
+def _extract_last_frame(video_path: Path, output_path: Path) -> None:
+    """Extract the final frame of a video as a PNG for Veo chain anchoring.
+
+    Uses -sseof to seek a tiny bit before EOF, then writes one frame.
+    -update 1 + -frames:v 1 ensures a single-image output. -q:v 1 keeps
+    quality high since this PNG becomes the starting frame for the next
+    Veo clip and we want it to look exactly like the moment we left off.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-sseof", "-0.1",
+        "-i", str(video_path),
+        "-update", "1",
+        "-frames:v", "1",
+        "-q:v", "1",
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Last-frame extract failed for {video_path.name}: {result.stderr}"
+        )
