@@ -51,6 +51,11 @@ class AssemblyStage:
 
         # Per-segment visual types (supports mixed Veo/Pillow fallback)
         segment_types = ctx.artifacts.get("segment_visual_types", {})
+        # Per-segment multi-clip paths (set by visual_gen when one Veo clip
+        # wasn't enough to cover the F5-TTS narration duration).
+        segment_clip_lists: dict[int, list[str]] = ctx.artifacts.get(
+            "segment_clips", {}
+        )
 
         # Step 1: Create per-segment video clips (visual + audio, no subtitles yet)
         segment_clips: list[Path] = []
@@ -59,9 +64,26 @@ class AssemblyStage:
             seg_type = segment_types.get(seg.index, VisualOutputType.IMAGE)
 
             if seg_type == VisualOutputType.VIDEO:
-                # Veo clip — mux with audio
+                # Multi-clip case: concat sub-clips into one segment-video first
+                # so that the muxed clip's video length >= audio length.
+                sub_clip_paths = segment_clip_lists.get(seg.index, [])
+                if len(sub_clip_paths) > 1:
+                    concat_path = work_dir / f"segment_{seg.index:02d}_concat.mp4"
+                    _concat_video_clips_with_xfade(
+                        clips=[Path(p) for p in sub_clip_paths],
+                        output_path=concat_path,
+                        crossfade_duration=vis_cfg.crossfade_duration,
+                        video_bitrate=vid_cfg.video_bitrate,
+                        pixel_format=vid_cfg.pixel_format,
+                        preset=vid_cfg.preset,
+                    )
+                    video_input = concat_path
+                else:
+                    video_input = Path(seg.image_path)
+
+                # Veo clip(s) → mux with audio
                 _mux_video_with_audio(
-                    video_path=Path(seg.image_path),
+                    video_path=video_input,
                     audio_path=Path(seg.audio_path),
                     output_path=clip_path,
                     video_bitrate=vid_cfg.video_bitrate,
@@ -367,11 +389,18 @@ def _mux_video_with_audio(
     """Mux a pre-animated video clip with its audio track.
 
     Applies a short audio fade-out before the -shortest cutoff so the
-    crossfade step doesn't inherit a hard audio boundary.
+    inter-segment crossfade doesn't inherit a hard audio boundary.
+
+    The fade anchors to min(audio, video) duration — historically video was
+    always shorter than audio (Veo's 8s clips vs F5-TTS's 14-20s narration),
+    which silently truncated the narration. With the multi-clip path video
+    is now usually longer than audio, so the cutoff is the audio length.
     """
     video_duration = _probe_duration(video_path)
+    audio_duration = _probe_duration(audio_path)
+    output_duration = min(video_duration, audio_duration)
     fade_ms = 0.05  # 50ms micro-fade — imperceptible but prevents pops
-    fade_start = max(0, video_duration - fade_ms)
+    fade_start = max(0, output_duration - fade_ms)
 
     _run_ffmpeg([
         "-i", str(video_path),
@@ -517,6 +546,58 @@ def _concat_with_crossfade(
             "-b:a", audio_bitrate,
             "-ar", str(audio_sample_rate),
             "-movflags", "+faststart",
+            str(output_path),
+        ]
+    )
+
+
+def _concat_video_clips_with_xfade(
+    clips: list[Path],
+    output_path: Path,
+    crossfade_duration: float,
+    video_bitrate: str,
+    pixel_format: str,
+    preset: str,
+) -> None:
+    """Concatenate sub-clips of one segment with video-only xfades.
+
+    Used when a segment has >1 Veo clip because the F5-TTS narration runs
+    longer than one Veo clip can cover. Output is video-only; audio gets
+    muxed in the next step from the segment's F5-TTS WAV.
+    """
+    if len(clips) < 2:
+        raise ValueError("Need at least 2 clips for sub-clip xfade concat")
+
+    inputs: list[str] = []
+    for clip in clips:
+        inputs.extend(["-i", str(clip)])
+
+    n = len(clips)
+    cf = crossfade_duration
+    durations = [_probe_duration(c) for c in clips]
+
+    filter_parts: list[str] = []
+    prev_label = "[0:v]"
+    offset = 0.0
+    for i in range(1, n):
+        offset += durations[i - 1] - cf
+        out_label = f"[v{i}]" if i < n - 1 else "[vout]"
+        filter_parts.append(
+            f"{prev_label}[{i}:v]xfade=transition=fade:duration={cf}:"
+            f"offset={offset:.3f}{out_label}"
+        )
+        prev_label = out_label
+
+    _run_ffmpeg(
+        inputs + [
+            "-filter_complex", ";".join(filter_parts),
+            "-map", "[vout]",
+            "-an",
+            "-c:v", "libx264",
+            "-profile:v", "high",
+            "-b:v", video_bitrate,
+            "-pix_fmt", pixel_format,
+            "-preset", preset,
             str(output_path),
         ]
     )

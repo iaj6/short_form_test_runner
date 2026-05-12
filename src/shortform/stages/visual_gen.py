@@ -1,8 +1,16 @@
-"""Visual generation stage — delegates to pluggable backends."""
+"""Visual generation stage — delegates to pluggable backends.
+
+For video-output backends (Veo), we generate N clips per segment so the
+visual track is at least as long as the F5-TTS narration. Veo is hard-locked
+at ~8s per clip, so a 20s narration needs 3 clips. Still-image backends
+(Pillow) keep producing one asset per segment — Ken Burns in assembly
+extends to any duration.
+"""
 
 from __future__ import annotations
 
 import logging
+import math
 
 from shortform.models.video import VideoStatus
 from shortform.pipeline.context import PipelineContext
@@ -11,6 +19,11 @@ from shortform.visuals.backend import VisualBackend, VisualOutputType
 from shortform.visuals.pillow_backend import PillowBackend
 
 logger = logging.getLogger(__name__)
+
+# Approximate usable seconds per Veo clip when stitched with a small xfade.
+# Veo 3 produces ~8s clips; we leave a bit of headroom for the inter-clip
+# crossfade in assembly, so each clip "contributes" ~7.5s of timeline.
+CLIP_TARGET_SECONDS = 7.5
 
 
 class VisualGenStage:
@@ -43,31 +56,75 @@ class VisualGenStage:
         config.update(ctx.strategy.visuals)
 
         has_video_clips = False
+        # Per-segment clip lists for assembly. Only populated when a video-output
+        # segment needed >1 clip; assembly falls back to seg.image_path otherwise.
+        segment_clips: dict[int, list[str]] = ctx.artifacts.setdefault(
+            "segment_clips", {}
+        )
 
         for seg in ctx.script.segments:
-            output_base = file_store.video_dir(ctx.video.id) / f"segment_{seg.index:02d}"
+            video_dir = file_store.video_dir(ctx.video.id)
+            # Always generate clip 0 first so we can see the output type before
+            # deciding whether to generate more.
+            first_output = video_dir / f"segment_{seg.index:02d}"
             logger.info(
-                "Generating visual for segment %d [%s]", seg.index, self._backend.name
+                "Generating visual for segment %d [%s] (clip 1)",
+                seg.index, self._backend.name,
             )
-
-            result = await self._backend.generate(
+            first_result = await self._backend.generate(
                 segment=seg,
-                output_path=output_base,
+                output_path=first_output,
                 width=vid_cfg.width,
                 height=vid_cfg.height,
                 config=config,
             )
-
-            seg.image_path = str(result.path)
-
-            # Track output type per segment for mixed Veo/Pillow fallback scenarios
+            seg.image_path = str(first_result.path)
             segment_types = ctx.artifacts.setdefault("segment_visual_types", {})
-            segment_types[seg.index] = result.output_type
+            segment_types[seg.index] = first_result.output_type
 
-            if result.output_type == VisualOutputType.VIDEO:
+            if first_result.output_type == VisualOutputType.VIDEO:
                 has_video_clips = True
 
-            logger.info("Visual saved: %s (%s)", result.path.name, result.output_type.value)
+            # Multi-clip path: if the backend produces video AND the audio is
+            # longer than one Veo clip, generate additional clips to cover it.
+            clip_paths: list[str] = [str(first_result.path)]
+            if first_result.output_type == VisualOutputType.VIDEO:
+                target_seconds = seg.actual_duration or seg.estimated_duration
+                n_clips_total = max(
+                    1, math.ceil(target_seconds / CLIP_TARGET_SECONDS)
+                )
+                if n_clips_total > 1:
+                    logger.info(
+                        "Segment %d needs %d clips for %.1fs audio",
+                        seg.index, n_clips_total, target_seconds,
+                    )
+                for extra_idx in range(1, n_clips_total):
+                    extra_output = (
+                        video_dir / f"segment_{seg.index:02d}_clip_{extra_idx:02d}"
+                    )
+                    logger.info(
+                        "Generating visual for segment %d [%s] (clip %d/%d)",
+                        seg.index, self._backend.name, extra_idx + 1, n_clips_total,
+                    )
+                    extra_result = await self._backend.generate(
+                        segment=seg,
+                        output_path=extra_output,
+                        width=vid_cfg.width,
+                        height=vid_cfg.height,
+                        config=config,
+                    )
+                    clip_paths.append(str(extra_result.path))
+
+            if len(clip_paths) > 1:
+                segment_clips[seg.index] = clip_paths
+                logger.info(
+                    "Segment %d: %d clips generated", seg.index, len(clip_paths),
+                )
+
+            logger.info(
+                "Visual saved: %s (%s)",
+                first_result.path.name, first_result.output_type.value,
+            )
 
         # Tell assembly whether it's dealing with stills or pre-animated clips
         ctx.artifacts["visual_output_type"] = (
@@ -75,9 +132,12 @@ class VisualGenStage:
         )
         ctx.video.status = VideoStatus.VISUALS_DONE
 
+        total_clips = sum(
+            len(segment_clips.get(s.index, [s.image_path]))
+            for s in ctx.script.segments
+        )
         logger.info(
-            "Visual generation complete: %d assets via %s",
-            len(ctx.script.segments),
-            self._backend.name,
+            "Visual generation complete: %d clips across %d segments via %s",
+            total_clips, len(ctx.script.segments), self._backend.name,
         )
         return ctx
