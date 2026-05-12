@@ -23,11 +23,17 @@ from pathlib import Path
 from typing import Any
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from shortform.models.script import Segment
 from shortform.visuals.backend import VisualOutput, VisualOutputType
 from shortform.visuals.pillow_backend import PillowBackend
+
+# Retry config for transient Gemini API failures (503/UNAVAILABLE, 429, 500).
+# The SDK's built-in tenacity retry sometimes lets these through to caller.
+VEO_RETRY_MAX_ATTEMPTS = 4
+VEO_RETRY_BASE_DELAY_SECONDS = 8
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +208,8 @@ async def _generate_video(
     if negative_prompt:
         config_kwargs["negative_prompt"] = negative_prompt
 
-    operation = client.models.generate_videos(
+    operation = await _submit_with_retry(
+        client=client,
         model=model,
         prompt=prompt,
         image=image,
@@ -229,3 +236,43 @@ async def _generate_video(
     video.video.save(str(output_path))
 
     logger.info("Veo video saved: %s", output_path.name)
+
+
+async def _submit_with_retry(
+    client: genai.Client,
+    model: str,
+    prompt: str,
+    image: types.Image,
+    config: types.GenerateVideosConfig,
+) -> Any:
+    """Submit a Veo generation with retry on transient API errors.
+
+    The Gemini API occasionally returns 503 UNAVAILABLE, 429 (rate limit), or
+    500 even though the request is well-formed. The SDK's built-in tenacity
+    retry doesn't always cover these, so we wrap the initial submission with
+    our own exponential backoff. We only retry the initial submission — once
+    we have an operation handle, the polling loop already tolerates flakes.
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, VEO_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return client.models.generate_videos(
+                model=model, prompt=prompt, image=image, config=config,
+            )
+        except genai_errors.ServerError as e:
+            last_err = e
+            status = getattr(e, "code", None) or "5xx"
+            if attempt == VEO_RETRY_MAX_ATTEMPTS:
+                logger.error(
+                    "Veo submit failed after %d attempts (status=%s): %s",
+                    attempt, status, e,
+                )
+                raise
+            delay = VEO_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+            logger.warning(
+                "Veo submit transient error (status=%s, attempt %d/%d), retrying in %ds: %s",
+                status, attempt, VEO_RETRY_MAX_ATTEMPTS, delay, e,
+            )
+            await asyncio.sleep(delay)
+    # Unreachable — loop either returns or raises
+    raise RuntimeError(f"Veo retry loop exited without result: {last_err}")
