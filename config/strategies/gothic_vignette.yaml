@@ -7,8 +7,17 @@ content:
   style: "Lemony Snicket meets Tim Burton meets Edward Gorey — small specific actions, quietly devastating payoffs"
   target_duration: 30
   segments: 3
-  voice: "en-US-RogerNeural"  # placeholder Edge TTS — will be replaced by F5-TTS clone of user's reference recording
-  rate: "-15%"  # slower for theatrical pacing
+
+# Voice: F5-TTS cloned from the user's theatrical reference recording.
+# ref_audio + ref_text must match (the reference clip says exactly the ref_text).
+# The trimmed reference is preferred — F5-TTS works best with 6-12s reference audio.
+tts:
+  backend: "f5_tts"
+  ref_audio: "data/voices/bartholomew_reference_trimmed.wav"
+  ref_text: "Good evening. Tonight, I shall speak slowly, with grave deliberation, of matters both ordinary and absurd."
+  model: "F5TTS_v1_Base"
+  speed: 0.95         # slightly slower for theatrical pacing
+  cfg_strength: 2.0
 
 prompts:
   system: |

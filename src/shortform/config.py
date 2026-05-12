@@ -20,6 +20,8 @@ class LLMConfig(BaseModel):
 
 
 class TTSConfig(BaseModel):
+    backend: str = "edge"  # edge | f5_tts
+    f5_tts_cli: str = "~/.venvs/f5-tts/bin/f5-tts_infer-cli"
     voice: str = "en-US-AriaNeural"
     rate: str = "+5%"
     volume: str = "+0%"
@@ -103,6 +105,7 @@ class StrategyConfig(BaseModel):
     prompts: dict[str, str] = {}
     topics: list[str] = []
     visuals: dict[str, Any] = {}
+    tts: dict[str, Any] = {}  # backend selection + backend-specific params (ref_audio, ref_text, ...)
     music: dict[str, Any] = {}  # track, volume overrides
 
 

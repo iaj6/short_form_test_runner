@@ -7,13 +7,14 @@ Short-form video generation pipeline targeting YouTube Shorts and Instagram Reel
 Linear stages with SQLite checkpointing. Resume-from-stage supported.
 
 ```
-ScriptGenStage  →  TTSStage  →  VisualGenStage  →  AssemblyStage  →  (PublishStage — stub)
-   (Claude)       (Edge TTS)     (Veo / Pillow)      (FFmpeg)
+ScriptGenStage  →  TTSStage         →  VisualGenStage  →  AssemblyStage  →  (PublishStage — stub)
+   (Claude)       (Edge / F5-TTS)     (Veo / Pillow)      (FFmpeg)
 ```
 
 Key files:
 - `src/shortform/pipeline/runner.py` — orchestration, checkpointing
 - `src/shortform/stages/` — one module per stage
+- `src/shortform/tts/` — pluggable TTS backends (Edge, F5-TTS); strategy picks via `tts.backend`
 - `src/shortform/visuals/` — pluggable backends (Pillow, Veo; Grok stub)
 - `src/shortform/stages/assembly.py` — the heavyweight: FFmpeg, animated subtitles, sidechain music ducking, Ken Burns on stills, crossfade transitions
 - `config/strategies/*.yaml` — strategy-specific prompts, voices, visual style, music category
@@ -60,44 +61,43 @@ Output reads as "AI short-form" because:
 
 ## Build Order (de-risk hardest thing first)
 
-1. ~~F5-TTS proof-of-concept on the M2 Pro spare Mac~~ ✓ **DONE** (2026-05-12) — voice clone sells the gothic-deadpan concept; greenlit. See "F5-TTS Setup Notes" below.
+1. ~~F5-TTS proof-of-concept~~ ✓ **DONE** (2026-05-12) — voice clone sells the gothic-deadpan concept; greenlit. Pipeline integration also landed: `src/shortform/tts/f5_backend.py` subprocesses `~/.venvs/f5-tts/bin/f5-tts_infer-cli` per segment; `gothic_vignette.yaml` opts in via its `tts:` block. First-segment cold start is ~3min on M4 (model load + JIT). See "F5-TTS Setup Notes" below for install + the 12s ref-audio gotcha.
 2. ~~Character reference image (Imagen via Gemini API)~~ **DONE** — locked at `data/character_refs/bartholomew_hero.png`. Generation script lives at `scripts/generate_bartholomew.py` (run with variants `--variant no_hat|wider|closer|standing` for alternate framing). Candidates pool is gitignored.
-3. ~~`gothic_vignette.yaml` strategy config~~ **DONE** — `config/strategies/gothic_vignette.yaml` has system prompt with the six canonical Bartholomew vignettes baked in as few-shot examples, 26 modern-dread topics, Veo reference/seed fields wired.
+3. ~~`gothic_vignette.yaml` strategy config~~ **DONE** — `config/strategies/gothic_vignette.yaml` has system prompt with the six canonical Bartholomew vignettes baked in as few-shot examples, 26 modern-dread topics, Veo reference/seed fields wired, and now a `tts:` block selecting `f5_tts` with the ref_audio/ref_text/model params.
 4. ~~Veo backend: reference-image anchoring + seed control~~ **DONE** — `src/shortform/visuals/veo_backend.py` reads `reference_image`, `veo_seed`, `veo_negative_prompt` from strategy config. Falls back to Pillow gradient gracefully when reference file missing. Tests in `tests/test_visuals.py`.
-5. **Source gothic/melancholic royalty-free music** — partially done. Curation manifest committed at `data/music/gothic/tracks.yaml` (6 recommended tracks with URLs, licenses, attribution text, mood tags). Audio files themselves are still gitignored and need downloading per-machine from the URLs in the manifest. Future selector logic can read the manifest to match tracks to vignettes by mood/tempo/intensity and auto-include attribution lines in publish descriptions (current `assembly.py` still picks randomly from all audio in the directory — manifest is advisory until selector lands).
-6. **End-to-end test:** one full ~30s video — gated on (5).
+5. ~~Source gothic/melancholic royalty-free music~~ **DONE on the Air** — `data/music/gothic/tracks.yaml` lists 6 tracks with URLs/licenses/attribution. All 6 audio files downloaded locally. Future selector logic can read the manifest to match tracks to vignettes by mood/tempo/intensity and auto-include attribution lines in publish descriptions (current `assembly.py` still picks randomly from all audio in the directory — manifest is advisory until selector lands).
+6. **End-to-end test:** one full ~30s video — now unblocked. Next concrete step.
 
 ## Machine Topology
 
-User has two machines for this project:
+**Single-machine setup as of 2026-05-12.** Everything runs on the user's MacBook Air (Apple M4, 32GB RAM, macOS 15.6). The M4 + 32GB is plenty for F5-TTS (MPS), ffmpeg (hw H.264/H.265 encoders), and the rest of the pipeline at iteration scale. There is also a spare M2 Pro MacBook available for future batch jobs but it's not part of the current critical path — the original "primary = code, spare = inference" split assumed primary was the weaker box, which isn't true here.
 
-- **Primary dev machine** (where the repo was created): iteration, code, Veo API calls (hit Google regardless). This is where the user typically works.
-- **Spare M2 Pro MacBook** (where you probably are now): long-running local inference. F5-TTS runs here. Eventually Whisper (for speech-accurate subtitle timing) and scheduled overnight batch generation.
+The earlier plan to run F5-TTS as a FastAPI LAN service from the M2 Pro is **shelved** unless something forces it back (e.g., long overnight batch jobs where sustained throughput on the actively-cooled Pro beats the fanless Air). Don't pre-build it.
 
-**Current architecture (simplest):** run the whole pipeline on whichever machine. Later, when F5-TTS integration stabilizes, we may split — main machine orchestrates, spare machine exposes F5-TTS as a FastAPI service on the LAN. For now, everything-local-to-current-machine is fine.
-
-## F5-TTS Setup Notes (M2 Pro spare machine)
+## F5-TTS Setup Notes
 
 - Isolated venv at `~/.venvs/f5-tts` (kept separate from project venv to avoid pulling torch into the slim shortform deps). Install: `uv venv ~/.venvs/f5-tts --python 3.12 && uv pip install --python ~/.venvs/f5-tts/bin/python f5-tts`. Requires `ffmpeg` (brew).
-- Reference voice for Bartholomew lives at `data/voices/bartholomew_reference.m4a` (gitignored). Trimmed clip and transcript sit alongside it. The original 54s recording is the canonical artifact — back it up off-machine; re-recording will not match.
+- Reference voice for Bartholomew lives at `data/voices/bartholomew_reference.m4a` (54s original, gitignored) with corresponding `bartholomew_reference.txt`. The trimmed-for-F5-TTS clip is `data/voices/bartholomew_reference_trimmed.wav` (9.7s) — this is the path `gothic_vignette.yaml` actually feeds to F5-TTS. The original 54s recording is the canonical artifact — back it up off-machine; re-recording will not match.
 - **F5-TTS clips `--ref_audio` to ~12 seconds.** It silently logs `Audio is over 12s, clipping short.` then proceeds. The full `--ref_text` is still used to estimate speaking rate, so a transcript longer than the clipped audio produces rushed output (e.g., 36 words generated as 3.3s instead of 17s). Always trim references to 8–12s with a matching partial transcript. Use `ffmpeg -af "silencedetect=noise=-30dB:d=0.4"` to find sentence-boundary cut points.
-- MPS works on M2 Pro (32GB). First inference ~63s for ~17s output (slower due to model load); subsequent runs faster.
+- MPS works on both the M2 Pro (where the PoC was first validated, ~63s first inference for ~17s output) and the M4 Air with 32GB (where the pipeline integration was validated, ~3min cold for the first segment due to model load + JIT; subsequent same-process inferences are fast but each subprocess invocation pays the load cost again).
+- Pipeline integration in `src/shortform/tts/f5_backend.py` (subprocess the CLI per segment). Strategy YAMLs opt in via a `tts:` block — see `config/strategies/gothic_vignette.yaml` for the canonical example.
 
 ## Data NOT in the Repo
 
 These paths are gitignored and need recreating or syncing:
 
-- `.env` — API keys. Copy from primary machine or rebuild from `.env.example`. Needs `ANTHROPIC_API_KEY` and `GOOGLE_GEMINI_API_KEY`.
-- `data/videos/` — generated output, ~200MB on primary. Don't sync, regenerate when needed.
-- `data/assets/` — per-segment frames, ~500MB. Intermediate only, regenerates.
-- `data/music/ambient/` and `data/music/upbeat/` — royalty-free tracks. Need to source/sync separately. New `data/music/gothic/` category coming for the Bartholomew work.
-- `data/*.db` — SQLite state, machine-specific, don't sync.
-- Voice reference audio (for F5-TTS) — will live at `data/voices/bartholomew_reference.wav` or similar, gitignored.
+- `.env` — API keys. Needs `ANTHROPIC_API_KEY` and `GOOGLE_GEMINI_API_KEY`. Rebuild from `.env.example` if missing.
+- `data/videos/` — generated output. Don't sync, regenerate when needed.
+- `data/assets/` — per-segment frames + intermediate audio. Regenerates.
+- `data/music/{ambient,upbeat,gothic}/` — royalty-free tracks. `gothic/tracks.yaml` is committed and has URLs for re-downloading.
+- `data/*.db` — SQLite state, machine-specific.
+- `data/voices/` — F5-TTS reference audio + per-machine test outputs. Current locked reference: `data/voices/bartholomew_reference_trimmed.wav` (9.7s) with matching `bartholomew_reference.txt` (the ref_text). Also `data/voices/bartholomew_reference.m4a` (the full 54s original).
+- `~/.venvs/f5-tts/` — separate uv-managed Python 3.12 venv with `f5-tts` installed from PyPI. Set up with: `uv venv ~/.venvs/f5-tts --python 3.12 && uv pip install --python ~/.venvs/f5-tts/bin/python f5-tts`. Lives outside the repo by design (heavy ML stack).
 
 ## Key Decisions Already Made (don't re-debate without cause)
 
 - **Python, not TypeScript** — better ML/video ecosystem. User defaults to TS but agreed Python is the right pick here.
-- **Local F5-TTS over ElevenLabs** — user doesn't want to pay-to-play with ElevenLabs free-tier character limits. F5-TTS is open, high-quality, runs fine on M2 Pro.
+- **Local F5-TTS over ElevenLabs** — user doesn't want to pay-to-play with ElevenLabs free-tier character limits. F5-TTS is open, high-quality, runs fine on the M4 Air.
 - **Veo image-to-video, not text-to-video** — already gives stronger consistency. Reference-image anchoring extends this.
 - **Keep the existing pipeline architecture** — linear stages + SQLite checkpointing + strategy YAML overlays are solid. The improvements are at the *content* layer, not the infra layer.
 - **Claude (Anthropic) for script generation, not Gemini** — quality difference matters for tone-sensitive writing like this.

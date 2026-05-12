@@ -6,6 +6,8 @@ llm:
   temperature: 0.8
 
 tts:
+  backend: "edge"           # edge | f5_tts; strategies can override
+  f5_tts_cli: "~/.venvs/f5-tts/bin/f5-tts_infer-cli"
   voice: "en-US-AriaNeural"
   rate: "+5%"
   volume: "+0%"
