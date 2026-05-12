@@ -60,12 +60,12 @@ Output reads as "AI short-form" because:
 
 ## Build Order (de-risk hardest thing first)
 
-1. **F5-TTS proof-of-concept** on the M2 Pro spare Mac — biggest unknown. If the cloned theatrical voice doesn't sell the concept, nothing else matters. *(in progress on spare M2 Pro)*
+1. ~~F5-TTS proof-of-concept on the M2 Pro spare Mac~~ ✓ **DONE** (2026-05-12) — voice clone sells the gothic-deadpan concept; greenlit. See "F5-TTS Setup Notes" below.
 2. ~~Character reference image (Imagen via Gemini API)~~ **DONE** — locked at `data/character_refs/bartholomew_hero.png`. Generation script lives at `scripts/generate_bartholomew.py` (run with variants `--variant no_hat|wider|closer|standing` for alternate framing). Candidates pool is gitignored.
 3. ~~`gothic_vignette.yaml` strategy config~~ **DONE** — `config/strategies/gothic_vignette.yaml` has system prompt with the six canonical Bartholomew vignettes baked in as few-shot examples, 26 modern-dread topics, Veo reference/seed fields wired.
 4. ~~Veo backend: reference-image anchoring + seed control~~ **DONE** — `src/shortform/visuals/veo_backend.py` reads `reference_image`, `veo_seed`, `veo_negative_prompt` from strategy config. Falls back to Pillow gradient gracefully when reference file missing. Tests in `tests/test_visuals.py`.
 5. **Source gothic/melancholic royalty-free music** — partially done. Curation manifest committed at `data/music/gothic/tracks.yaml` (6 recommended tracks with URLs, licenses, attribution text, mood tags). Audio files themselves are still gitignored and need downloading per-machine from the URLs in the manifest. Future selector logic can read the manifest to match tracks to vignettes by mood/tempo/intensity and auto-include attribution lines in publish descriptions (current `assembly.py` still picks randomly from all audio in the directory — manifest is advisory until selector lands).
-6. **End-to-end test:** one full ~30s video — gated on (1) and (5).
+6. **End-to-end test:** one full ~30s video — gated on (5).
 
 ## Machine Topology
 
@@ -75,6 +75,13 @@ User has two machines for this project:
 - **Spare M2 Pro MacBook** (where you probably are now): long-running local inference. F5-TTS runs here. Eventually Whisper (for speech-accurate subtitle timing) and scheduled overnight batch generation.
 
 **Current architecture (simplest):** run the whole pipeline on whichever machine. Later, when F5-TTS integration stabilizes, we may split — main machine orchestrates, spare machine exposes F5-TTS as a FastAPI service on the LAN. For now, everything-local-to-current-machine is fine.
+
+## F5-TTS Setup Notes (M2 Pro spare machine)
+
+- Isolated venv at `~/.venvs/f5-tts` (kept separate from project venv to avoid pulling torch into the slim shortform deps). Install: `uv venv ~/.venvs/f5-tts --python 3.12 && uv pip install --python ~/.venvs/f5-tts/bin/python f5-tts`. Requires `ffmpeg` (brew).
+- Reference voice for Bartholomew lives at `data/voices/bartholomew_reference.m4a` (gitignored). Trimmed clip and transcript sit alongside it. The original 54s recording is the canonical artifact — back it up off-machine; re-recording will not match.
+- **F5-TTS clips `--ref_audio` to ~12 seconds.** It silently logs `Audio is over 12s, clipping short.` then proceeds. The full `--ref_text` is still used to estimate speaking rate, so a transcript longer than the clipped audio produces rushed output (e.g., 36 words generated as 3.3s instead of 17s). Always trim references to 8–12s with a matching partial transcript. Use `ffmpeg -af "silencedetect=noise=-30dB:d=0.4"` to find sentence-boundary cut points.
+- MPS works on M2 Pro (32GB). First inference ~63s for ~17s output (slower due to model load); subsequent runs faster.
 
 ## Data NOT in the Repo
 

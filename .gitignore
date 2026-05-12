@@ -16,6 +16,7 @@ venv/
 data/videos/
 data/assets/
 data/models/
+data/voices/
 data/*.db
 data/*.db-shm
 data/*.db-wal
