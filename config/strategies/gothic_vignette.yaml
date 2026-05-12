@@ -123,7 +123,9 @@ visuals:
   # Veo reference-image anchoring — used by extended VeoBackend (pending implementation).
   # Path is relative to project root. Image is gitignored; sync separately.
   reference_image: "data/character_refs/bartholomew_hero.png"
-  veo_seed: 314159  # fixed seed per strategy for cross-video consistency
+  # veo_seed disabled: Gemini API rejects seed for video generation (would need
+  # Vertex AI). Reference image is the consistency anchor; seed was belt-and-suspenders.
+  # veo_seed: 314159
 
   # Pillow fallback styling (when Veo unavailable or filtered)
   gradient_top: "#0f0808"

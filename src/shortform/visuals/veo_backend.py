@@ -180,6 +180,13 @@ async def _generate_video(
 
     # Build config kwargs — only include optional fields when set so the SDK
     # doesn't see None for fields that don't accept it.
+    #
+    # Note: the public Gemini API does NOT support the `seed` parameter for
+    # video generation (only the Vertex AI Veo endpoint does). The SDK
+    # raises ValueError if we pass it, so we silently ignore `seed` from
+    # strategy config until/unless we add a Vertex AI path. Visual identity
+    # consistency relies on the reference_image anchor — per CLAUDE.md, the
+    # reference image is the primary signal, "stronger than Veo seeds alone."
     config_kwargs: dict[str, Any] = {
         "aspect_ratio": "9:16",
         "number_of_videos": 1,
@@ -187,7 +194,11 @@ async def _generate_video(
         "resolution": "1080p",
     }
     if seed is not None:
-        config_kwargs["seed"] = int(seed)
+        logger.debug(
+            "veo_seed=%s present in config but ignored — Gemini API does not "
+            "support seed for video generation",
+            seed,
+        )
     if negative_prompt:
         config_kwargs["negative_prompt"] = negative_prompt
 
