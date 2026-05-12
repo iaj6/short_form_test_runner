@@ -32,6 +32,12 @@ data/music/**/*.ogg
 # Character refs: ignore the generated candidates pool, track the locked hero image(s)
 data/character_refs/candidates/
 
+# Voice reference clips for F5-TTS — gitignored, machine-local
+data/voices/
+
+# Political-juxtaposition test item: downloaded source videos + extracted clip candidates
+data/moments/
+
 # IDE
 .idea/
 .vscode/
