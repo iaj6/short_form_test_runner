@@ -30,10 +30,13 @@ from shortform.models.script import Segment
 from shortform.visuals.backend import VisualOutput, VisualOutputType
 from shortform.visuals.pillow_backend import PillowBackend
 
-# Retry config for transient Gemini API failures (503/UNAVAILABLE, 429, 500).
-# The SDK's built-in tenacity retry sometimes lets these through to caller.
+# Retry config for transient Gemini API failures.
+# 5xx (ServerError) — usually clears in seconds; base 8s, 4 attempts → ~2min max.
+# 429 (ClientError RESOURCE_EXHAUSTED) — rate-limit windows are typically minute-
+# scale, so base 30s, 4 attempts → ~7.5min max cumulative wait.
 VEO_RETRY_MAX_ATTEMPTS = 4
-VEO_RETRY_BASE_DELAY_SECONDS = 8
+VEO_RETRY_BASE_DELAY_5XX_SECONDS = 8
+VEO_RETRY_BASE_DELAY_429_SECONDS = 30
 
 logger = logging.getLogger(__name__)
 
@@ -263,11 +266,16 @@ async def _submit_with_retry(
 ) -> Any:
     """Submit a Veo generation with retry on transient API errors.
 
-    The Gemini API occasionally returns 503 UNAVAILABLE, 429 (rate limit), or
-    500 even though the request is well-formed. The SDK's built-in tenacity
-    retry doesn't always cover these, so we wrap the initial submission with
-    our own exponential backoff. We only retry the initial submission — once
-    we have an operation handle, the polling loop already tolerates flakes.
+    Two retryable classes:
+      - 5xx ServerError (503 UNAVAILABLE, 500, 502, 504) — usually clears in
+        seconds. Base delay 8s.
+      - 429 ClientError RESOURCE_EXHAUSTED — Gemini's per-minute / per-day
+        rate limits. These need longer backoff to give the window time to
+        reset. Base delay 30s.
+
+    All other ClientErrors (400 bad request, 401 auth, 403 forbidden, 404)
+    fail fast — retrying won't help. We only retry the initial submission;
+    once we have an operation handle, polling already tolerates flakes.
     """
     last_err: Exception | None = None
     for attempt in range(1, VEO_RETRY_MAX_ATTEMPTS + 1):
@@ -275,19 +283,31 @@ async def _submit_with_retry(
             return client.models.generate_videos(
                 model=model, prompt=prompt, image=image, config=config,
             )
-        except genai_errors.ServerError as e:
+        except genai_errors.APIError as e:
+            status = getattr(e, "code", None)
+            is_5xx = isinstance(e, genai_errors.ServerError)
+            is_429 = status == 429
+            if not (is_5xx or is_429):
+                # Non-retryable: re-raise immediately
+                raise
+
             last_err = e
-            status = getattr(e, "code", None) or "5xx"
             if attempt == VEO_RETRY_MAX_ATTEMPTS:
                 logger.error(
                     "Veo submit failed after %d attempts (status=%s): %s",
                     attempt, status, e,
                 )
                 raise
-            delay = VEO_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+            base = (
+                VEO_RETRY_BASE_DELAY_429_SECONDS
+                if is_429
+                else VEO_RETRY_BASE_DELAY_5XX_SECONDS
+            )
+            delay = base * (2 ** (attempt - 1))
+            label = "rate-limit (429)" if is_429 else f"transient {status}"
             logger.warning(
-                "Veo submit transient error (status=%s, attempt %d/%d), retrying in %ds: %s",
-                status, attempt, VEO_RETRY_MAX_ATTEMPTS, delay, e,
+                "Veo submit %s (attempt %d/%d), retrying in %ds: %s",
+                label, attempt, VEO_RETRY_MAX_ATTEMPTS, delay, e,
             )
             await asyncio.sleep(delay)
     # Unreachable — loop either returns or raises

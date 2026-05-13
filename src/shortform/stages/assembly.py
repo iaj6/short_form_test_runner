@@ -490,7 +490,12 @@ def _concat_with_crossfade(
     pixel_format: str,
     preset: str,
 ) -> None:
-    """Concatenate clips with video crossfade and audio crossfade transitions."""
+    """Concatenate clips with video crossfade and audio crossfade transitions.
+
+    Both video and audio streams get their timebases normalized first
+    (`settb=AVTB,setpts=PTS-STARTPTS` for video, `asettb=AVTB,asetpts=PTS-STARTPTS`
+    for audio) so xfade/acrossfade don't reject mismatched-timebase inputs.
+    """
     if len(clips) < 2:
         raise ValueError("Need at least 2 clips for crossfade concatenation")
 
@@ -507,25 +512,30 @@ def _concat_with_crossfade(
     # Get durations for offset calculation
     durations = [_probe_duration(clip) for clip in clips]
 
-    # Video crossfade chain
-    prev_label = "[0:v]"
+    # Normalize timebases on all inputs (video + audio) before xfade chains
+    for i in range(n):
+        filter_parts.append(f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS[vn{i}]")
+        filter_parts.append(f"[{i}:a]asettb=AVTB,asetpts=PTS-STARTPTS[an{i}]")
+
+    # Video crossfade chain (over normalized streams)
+    prev_label = "[vn0]"
     offset = 0.0
     for i in range(1, n):
         offset += durations[i - 1] - cf
         out_label = f"[v{i}]" if i < n - 1 else "[vout]"
         filter_parts.append(
-            f"{prev_label}[{i}:v]xfade=transition=fade:duration={cf}:offset={offset:.3f}{out_label}"
+            f"{prev_label}[vn{i}]xfade=transition=fade:duration={cf}:offset={offset:.3f}{out_label}"
         )
         prev_label = out_label
 
-    # Audio crossfade chain
-    prev_label = "[0:a]"
+    # Audio crossfade chain (over normalized streams)
+    prev_label = "[an0]"
     offset = 0.0
     for i in range(1, n):
         offset += durations[i - 1] - cf
         out_label = f"[a{i}]" if i < n - 1 else "[aout]"
         filter_parts.append(
-            f"{prev_label}[{i}:a]acrossfade=d={cf}:c1=tri:c2=tri{out_label}"
+            f"{prev_label}[an{i}]acrossfade=d={cf}:c1=tri:c2=tri{out_label}"
         )
         prev_label = out_label
 
@@ -564,6 +574,11 @@ def _concat_video_clips_with_xfade(
     Used when a segment has >1 Veo clip because the F5-TTS narration runs
     longer than one Veo clip can cover. Output is video-only; audio gets
     muxed in the next step from the segment's F5-TTS WAV.
+
+    Each input gets `settb=AVTB,setpts=PTS-STARTPTS` applied first to
+    normalize timebases — Veo occasionally returns clips with slightly
+    different internal timebases (e.g. 1/12288 vs 1/15360) and xfade
+    rejects mismatched-timebase inputs with a parse error.
     """
     if len(clips) < 2:
         raise ValueError("Need at least 2 clips for sub-clip xfade concat")
@@ -576,21 +591,25 @@ def _concat_video_clips_with_xfade(
     cf = crossfade_duration
     durations = [_probe_duration(c) for c in clips]
 
-    filter_parts: list[str] = []
-    prev_label = "[0:v]"
+    # Normalize timebase per input
+    norm_parts = [f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS[vn{i}]" for i in range(n)]
+
+    # xfade chain over normalized inputs
+    xfade_parts: list[str] = []
+    prev_label = "[vn0]"
     offset = 0.0
     for i in range(1, n):
         offset += durations[i - 1] - cf
         out_label = f"[v{i}]" if i < n - 1 else "[vout]"
-        filter_parts.append(
-            f"{prev_label}[{i}:v]xfade=transition=fade:duration={cf}:"
+        xfade_parts.append(
+            f"{prev_label}[vn{i}]xfade=transition=fade:duration={cf}:"
             f"offset={offset:.3f}{out_label}"
         )
         prev_label = out_label
 
     _run_ffmpeg(
         inputs + [
-            "-filter_complex", ";".join(filter_parts),
+            "-filter_complex", ";".join(norm_parts + xfade_parts),
             "-map", "[vout]",
             "-an",
             "-c:v", "libx264",
