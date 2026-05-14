@@ -133,6 +133,37 @@ class VisualGenStage:
                         height=vid_cfg.height,
                         config=chain_config,
                     )
+
+                    # If the chained generation got rejected (e.g., Veo safety
+                    # filter on the chained frame) and the backend fell back
+                    # to a still image, retry once anchored to the hero ref
+                    # instead — chained frames are sometimes darker/more
+                    # skeletal in ways that trigger filters the clean hero
+                    # doesn't. If that *also* fails, we stop multi-clip
+                    # generation for this segment rather than mixing video
+                    # and still-image paths through the rest of the pipeline.
+                    if extra_result.output_type != VisualOutputType.VIDEO:
+                        logger.warning(
+                            "Segment %d clip %d chained gen produced %s (likely Veo safety filter); "
+                            "retrying with hero-ref anchor",
+                            seg.index, extra_idx, extra_result.output_type.value,
+                        )
+                        extra_result = await self._backend.generate(
+                            segment=seg,
+                            output_path=extra_output,
+                            width=vid_cfg.width,
+                            height=vid_cfg.height,
+                            config=config,  # no chain_from → falls back to reference_image
+                        )
+                        if extra_result.output_type != VisualOutputType.VIDEO:
+                            logger.warning(
+                                "Segment %d clip %d hero-ref retry also failed; "
+                                "stopping multi-clip gen with %d video clip(s). "
+                                "Final muxed clip will be %.1fs short of audio.",
+                                seg.index, extra_idx, len(clip_paths),
+                                target_seconds - len(clip_paths) * CLIP_TARGET_SECONDS,
+                            )
+                            break
                     clip_paths.append(str(extra_result.path))
 
             if len(clip_paths) > 1:

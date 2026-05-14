@@ -73,6 +73,9 @@ class AssemblyStage:
                         clips=[Path(p) for p in sub_clip_paths],
                         output_path=concat_path,
                         crossfade_duration=vis_cfg.crossfade_duration,
+                        fps=vid_cfg.fps,
+                        width=vid_cfg.width,
+                        height=vid_cfg.height,
                         video_bitrate=vid_cfg.video_bitrate,
                         pixel_format=vid_cfg.pixel_format,
                         preset=vid_cfg.preset,
@@ -492,9 +495,15 @@ def _concat_with_crossfade(
 ) -> None:
     """Concatenate clips with video crossfade and audio crossfade transitions.
 
-    Both video and audio streams get their timebases normalized first
-    (`settb=AVTB,setpts=PTS-STARTPTS` for video, `asettb=AVTB,asetpts=PTS-STARTPTS`
-    for audio) so xfade/acrossfade don't reject mismatched-timebase inputs.
+    Defensive per-input normalization before xfade/acrossfade because the
+    pre-muxed segment clips inherit whatever timebase / framerate / sample
+    rate the upstream Veo + F5-TTS produced, and we've seen mismatches:
+      - timebase (1/12288 vs 1/15360) → xfade parse error
+      - framerate (24/1 vs 25/1) → xfade parse error
+      - (defensive) audio sample rate inconsistencies → acrossfade weirdness
+
+    Video chain per input: settb=AVTB,setpts=PTS-STARTPTS,fps=N,scale=W:H,format=PIXFMT
+    Audio chain per input: asettb=AVTB,asetpts=PTS-STARTPTS,aresample=R
     """
     if len(clips) < 2:
         raise ValueError("Need at least 2 clips for crossfade concatenation")
@@ -512,10 +521,15 @@ def _concat_with_crossfade(
     # Get durations for offset calculation
     durations = [_probe_duration(clip) for clip in clips]
 
-    # Normalize timebases on all inputs (video + audio) before xfade chains
+    # Per-input normalization
+    v_norm = (
+        f"settb=AVTB,setpts=PTS-STARTPTS,fps={fps},"
+        f"scale={width}:{height},format={pixel_format}"
+    )
+    a_norm = f"asettb=AVTB,asetpts=PTS-STARTPTS,aresample={audio_sample_rate}"
     for i in range(n):
-        filter_parts.append(f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS[vn{i}]")
-        filter_parts.append(f"[{i}:a]asettb=AVTB,asetpts=PTS-STARTPTS[an{i}]")
+        filter_parts.append(f"[{i}:v]{v_norm}[vn{i}]")
+        filter_parts.append(f"[{i}:a]{a_norm}[an{i}]")
 
     # Video crossfade chain (over normalized streams)
     prev_label = "[vn0]"
@@ -565,6 +579,9 @@ def _concat_video_clips_with_xfade(
     clips: list[Path],
     output_path: Path,
     crossfade_duration: float,
+    fps: int,
+    width: int,
+    height: int,
     video_bitrate: str,
     pixel_format: str,
     preset: str,
@@ -575,10 +592,15 @@ def _concat_video_clips_with_xfade(
     longer than one Veo clip can cover. Output is video-only; audio gets
     muxed in the next step from the segment's F5-TTS WAV.
 
-    Each input gets `settb=AVTB,setpts=PTS-STARTPTS` applied first to
-    normalize timebases — Veo occasionally returns clips with slightly
-    different internal timebases (e.g. 1/12288 vs 1/15360) and xfade
-    rejects mismatched-timebase inputs with a parse error.
+    Each input is normalized before the xfade chain because Veo's outputs
+    are not 100% consistent across calls — we've seen timebase mismatches
+    (1/12288 vs 1/15360) and framerate mismatches (24/1 vs 25/1) in the
+    wild. xfade rejects either mismatch with a parse error. The
+    normalization chain handles all known mismatches:
+      - settb=AVTB,setpts=PTS-STARTPTS — uniform timebase (AV_TIME_BASE)
+      - fps=N — uniform framerate via frame resampling
+      - scale=W:H — uniform dimensions (no-op if already matching)
+      - format=PIXFMT — uniform pixel format
     """
     if len(clips) < 2:
         raise ValueError("Need at least 2 clips for sub-clip xfade concat")
@@ -591,8 +613,12 @@ def _concat_video_clips_with_xfade(
     cf = crossfade_duration
     durations = [_probe_duration(c) for c in clips]
 
-    # Normalize timebase per input
-    norm_parts = [f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS[vn{i}]" for i in range(n)]
+    # Normalize timebase, framerate, dimensions, and pixel format per input
+    norm_chain = (
+        f"settb=AVTB,setpts=PTS-STARTPTS,fps={fps},"
+        f"scale={width}:{height},format={pixel_format}"
+    )
+    norm_parts = [f"[{i}:v]{norm_chain}[vn{i}]" for i in range(n)]
 
     # xfade chain over normalized inputs
     xfade_parts: list[str] = []
