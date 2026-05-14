@@ -92,24 +92,48 @@ class VeoBackend:
             animation_prompt[:80],
         )
 
-        try:
-            await _generate_video(
-                api_key=self.api_key,
-                model=self.model,
-                image_path=base_frame_path,
-                prompt=animation_prompt,
-                output_path=video_path,
-                seed=config.get("veo_seed"),
-                negative_prompt=config.get("veo_negative_prompt"),
-            )
-        except RuntimeError as e:
-            # Safety filter or other Veo rejection — fall back to Pillow still image
-            logger.warning(
-                "Veo failed for segment %d, falling back to Pillow: %s",
-                segment.index,
-                e,
-            )
-            return await PillowBackend().generate(segment, output_path, width, height, config)
+        # Veo's safety filter is statistical: the same prompt + reference
+        # image can be rejected on one call and accepted on a retry. We give
+        # it one retry on safety-filter-style rejections before falling back
+        # to a Pillow still image. Non-safety RuntimeErrors (404, malformed
+        # response, etc.) fail through to Pillow immediately — retrying
+        # won't help.
+        last_err: RuntimeError | None = None
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await _generate_video(
+                    api_key=self.api_key,
+                    model=self.model,
+                    image_path=base_frame_path,
+                    prompt=animation_prompt,
+                    output_path=video_path,
+                    seed=config.get("veo_seed"),
+                    negative_prompt=config.get("veo_negative_prompt"),
+                )
+                return VisualOutput(
+                    path=video_path,
+                    output_type=VisualOutputType.VIDEO,
+                    width=width,
+                    height=height,
+                )
+            except RuntimeError as e:
+                last_err = e
+                is_safety = "blocked by safety filters" in str(e)
+                if is_safety and attempt < max_attempts:
+                    logger.warning(
+                        "Veo safety-filter rejection on segment %d (attempt %d/%d), retrying...",
+                        segment.index, attempt, max_attempts,
+                    )
+                    continue
+                # Either non-safety error or out of retries — fall through to Pillow
+                break
+
+        logger.warning(
+            "Veo failed for segment %d, falling back to Pillow: %s",
+            segment.index, last_err,
+        )
+        return await PillowBackend().generate(segment, output_path, width, height, config)
 
         return VisualOutput(
             path=video_path,
