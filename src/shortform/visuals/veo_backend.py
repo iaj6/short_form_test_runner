@@ -46,7 +46,7 @@ POLL_INTERVAL_SECONDS = 10
 class VeoBackend:
     """Google Veo image-to-video backend."""
 
-    def __init__(self, api_key: str = "", model: str = "veo-3.0-generate-001") -> None:
+    def __init__(self, api_key: str = "", model: str = "veo-3.1-generate-preview") -> None:
         self.api_key = api_key
         self.model = model
 
