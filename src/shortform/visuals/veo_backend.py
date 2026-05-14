@@ -315,6 +315,25 @@ async def _submit_with_retry(
                 # Non-retryable: re-raise immediately
                 raise
 
+            # Distinguish credits-depleted from true rate-limit. Both come back
+            # as 429 RESOURCE_EXHAUSTED but with different message bodies.
+            # Retrying when credits are gone burns 7+ minutes of wall time
+            # accomplishing nothing — fail fast so the user gets a clear signal
+            # and can top up.
+            msg_lower = str(e).lower()
+            is_credits_depleted = is_429 and (
+                "credits are depleted" in msg_lower
+                or "prepayment credits" in msg_lower
+                or "billing" in msg_lower
+            )
+            if is_credits_depleted:
+                logger.error(
+                    "Veo: prepayment credits depleted — top up at "
+                    "https://ai.studio/projects then re-run. (Not retrying — "
+                    "credit issues won't resolve via backoff.)"
+                )
+                raise
+
             last_err = e
             if attempt == VEO_RETRY_MAX_ATTEMPTS:
                 logger.error(
