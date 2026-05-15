@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_CLI_PATH = "~/.venvs/f5-tts/bin/f5-tts_infer-cli"
 DEFAULT_MODEL = "F5TTS_v1_Base"
 
+# F5-TTS occasionally segfaults at MPS model load on Apple Silicon (exit -11).
+# Pure transient — retrying with the same input usually succeeds. Other
+# non-zero exits (positive codes) are also worth a retry since memory/disk
+# pressure mid-load can cause them and they similarly clear on a second try.
+SUBPROCESS_MAX_ATTEMPTS = 2
+
 
 class F5TTSBackend:
     """F5-TTS via subprocess to its dedicated venv."""
@@ -107,10 +113,27 @@ class F5TTSBackend:
                 len(segment.narration),
                 model,
             )
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result: subprocess.CompletedProcess[str] | None = None
+            for attempt in range(1, SUBPROCESS_MAX_ATTEMPTS + 1):
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    break
+                if attempt < SUBPROCESS_MAX_ATTEMPTS:
+                    sig_hint = (
+                        " (SIGSEGV — MPS model-load crash, common on Apple Silicon)"
+                        if result.returncode == -11 else ""
+                    )
+                    logger.warning(
+                        "F5-TTS segment %d failed (exit %d, attempt %d/%d)%s, retrying...",
+                        segment.index, result.returncode, attempt,
+                        SUBPROCESS_MAX_ATTEMPTS, sig_hint,
+                    )
+
+            assert result is not None  # loop always runs at least once
             if result.returncode != 0:
                 raise RuntimeError(
-                    f"f5-tts_infer-cli failed (exit {result.returncode}):\n"
+                    f"f5-tts_infer-cli failed after {SUBPROCESS_MAX_ATTEMPTS} "
+                    f"attempts (final exit {result.returncode}):\n"
                     f"stderr (tail): {result.stderr[-800:]}"
                 )
 
