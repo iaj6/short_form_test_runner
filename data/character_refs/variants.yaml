@@ -1,0 +1,151 @@
+# Bartholomew hero-reference variants — per-segment base frames for Veo
+# image-to-video. Each variant preserves the same clay-skeleton character
+# (face, wardrobe, proportions) but places him in a different scene, so
+# Veo doesn't have to morph an unrelated environment when the topic doesn't
+# match the locked study scene. See docs/m2_pro_phase_0_handoff.md context
+# on why we ended up here.
+#
+# Generation: variants except `study` are produced by Nano Banana Pro
+# (Gemini 3 Pro Image) editing the locked hero PNG. Run with:
+#   uv run python scripts/generate_bartholomew.py --edit-variants
+# Cost: ~$0.04 per variant; ~$0.20 for the whole set.
+#
+# The VariantSelectionStage reads this file and asks Claude to pick the
+# best variant per script segment based on the segment's narration +
+# visual_prompt.
+
+variants:
+  - key: study
+    file: bartholomew_hero.png
+    description: |
+      Bartholomew at his small Victorian writing desk, lit by a single
+      beeswax candle. Mahogany bookshelf, urn, stack of unpaid bills, an
+      anachronistic small CRT monitor in the background. Sepia / oxblood /
+      deep umber palette, shallow depth of field, classic contemplative pose.
+    fits: |
+      Contemplative or paper-based topics. Bills, rent, warranties, the news,
+      reading, considering, photographs, anything where Bartholomew is at
+      his familiar desk with the candle and the urn. Default for ambiguous
+      cases.
+    edit_prompt: null  # this IS the locked hero — no edit needed
+
+  - key: laptop
+    file: variants/bartholomew_laptop.png
+    description: |
+      Bartholomew hunched at a small modern laptop in the same dim Victorian
+      study. Eye-socket shadows lit by the cool blue laptop glow. The candle
+      still burns to one side but the laptop dominates the lighting.
+    fits: |
+      Digital-life topics. Job applications, restructuring/layoffs, unread
+      emails, dating apps, productivity tools, customer service, software
+      updates, LinkedIn requests, the return to the office (dread of).
+    edit_prompt: |
+      Re-render the same clay skeleton character (preserve the exact face,
+      the moth-eaten chocolate-brown tweed cardigan, the oversized round
+      wire-rim spectacles, the small dented bowler hat, the burgundy bowtie)
+      now hunched forward over a small modern laptop placed on his Victorian
+      writing desk. The laptop screen casts a cool blue glow that lights the
+      eye sockets and the underside of the tweed cardigan; the rest of the
+      study falls into deep umber shadow with the beeswax candle visible but
+      dimmer than the screen. Skeletal fingers rest on the keyboard, posture
+      slightly slumped toward the screen. Keep the shallow depth of field,
+      sepia/oxblood/deep-umber palette in the unlit areas, gothic chiaroscuro,
+      claymation stop-motion aesthetic.
+
+  - key: kitchen
+    file: variants/bartholomew_kitchen.png
+    description: |
+      Bartholomew in a small Victorian-anachronistic kitchen — copper pots
+      on the wall, a gas burner on a worn wooden counter, a modern
+      dishwasher tucked beneath, a single sad loaf of bread on a wooden
+      cutting board.
+    fits: |
+      Domestic-failure topics. The dishwasher, bread/breakfast, the
+      houseplant (could go either way with study), the produce aisle
+      (alt to grocer if the scene is at home).
+    edit_prompt: |
+      Re-render the same clay skeleton character (preserve the exact face,
+      the moth-eaten chocolate-brown tweed cardigan, the oversized round
+      wire-rim spectacles, the small dented bowler hat, the burgundy bowtie)
+      now standing in a small dim Victorian-anachronistic kitchen. Copper
+      pots hang on the back wall. A single gas burner sits on a worn
+      wooden counter. A modern dishwasher is tucked under the counter,
+      partially visible. A single sad loaf of bread rests on a wooden
+      cutting board nearby. Lighting is soft candlelight from one side
+      plus faint cool daylight from a small window. The skeleton stands
+      at the counter, skeletal hands resting on its edge or just above
+      the dishwasher handle, posture slightly stooped. Keep the
+      sepia/oxblood/deep-umber palette, shallow depth of field, gothic
+      chiaroscuro, claymation stop-motion aesthetic.
+
+  - key: grocer
+    file: variants/bartholomew_grocer.png
+    description: |
+      Bartholomew in a small dim corner grocer's shop. Gas lamps overhead,
+      shelves of nondescript canned goods, a brass cash register on a
+      wooden counter with a modern thermal receipt printer beside it.
+    fits: |
+      Shopping topics where Bartholomew leaves the house. Bread at the
+      grocer's, produce aisle, prices/inflation moments outside the home.
+    edit_prompt: |
+      Re-render the same clay skeleton character (preserve the exact face,
+      the moth-eaten chocolate-brown tweed cardigan, the oversized round
+      wire-rim spectacles, the small dented bowler hat, the burgundy bowtie)
+      now standing in a small dim corner grocer's shop. Gas lamps overhead
+      cast warm orange light. Shelves of nondescript canned goods and bread
+      loaves line the background. A brass cash register sits on a wooden
+      counter with a small modern thermal receipt printer beside it. The
+      framing is slightly more open than the study — outside-the-home
+      energy — but still gothic and dim. The skeleton stands somewhere in
+      front of the shelves, possibly examining a small loaf or a receipt
+      with skeletal fingers. Same sepia/oxblood/deep-umber palette, shallow
+      depth of field, claymation stop-motion aesthetic.
+
+  - key: phone
+    file: variants/bartholomew_phone.png
+    description: |
+      Bartholomew seated in the dim study, holding a small modern smartphone
+      in skeletal hands close to his face. The phone screen casts a bright
+      blue-white glow that lights the skull from below, deepening the
+      eye-socket shadows. The rest of the room sinks into umber shadow.
+    fits: |
+      Phone-specific dread topics. Doom-scrolling at 2 AM, autocorrect
+      betraying him, customer service hold music, a notification he cannot
+      dismiss, phone storage running out.
+    edit_prompt: |
+      Re-render the same clay skeleton character (preserve the exact face,
+      the moth-eaten chocolate-brown tweed cardigan, the oversized round
+      wire-rim spectacles, the small dented bowler hat, the burgundy bowtie)
+      now seated in his dim Victorian study, holding a small modern
+      smartphone in skeletal hands close to his face. The phone screen
+      casts a bright cool blue-white glow that lights the skull from below,
+      deepening the eye-socket shadows dramatically. The rest of the room
+      falls into deep umber shadow; the beeswax candle is visible in the
+      background but is dimmer than the phone screen. Posture is hunched
+      slightly forward toward the device. Keep the sepia/oxblood/deep-umber
+      palette in the unlit areas, shallow depth of field, gothic
+      chiaroscuro, claymation stop-motion aesthetic.
+
+  - key: window
+    file: variants/bartholomew_window.png
+    description: |
+      Bartholomew standing in profile by a tall arched Victorian window,
+      partially silhouetted against soft cool gray daylight from outside.
+      Fog or light rain visible through the glass. Pure melancholic
+      contemplation mode.
+    fits: |
+      Contemplative-melancholy topics. Sunday evening, the heat death of
+      the universe before bed, the news briefly considered, an old
+      photograph in a drawer (alt to study), pure-mood pieces.
+    edit_prompt: |
+      Re-render the same clay skeleton character (preserve the exact face,
+      the moth-eaten chocolate-brown tweed cardigan, the oversized round
+      wire-rim spectacles, the small dented bowler hat, the burgundy bowtie)
+      now standing in profile by a tall arched Victorian window. Soft cool
+      gray daylight comes through the glass — fog or light rain visible
+      outside. The skeleton is partially silhouetted, with rim light
+      catching the shoulder and the side of the skull. Posture is upright,
+      one skeletal hand resting on the window frame, looking out
+      contemplatively. Same sepia/oxblood/deep-umber palette in the unlit
+      portions, shallow depth of field, gothic chiaroscuro, claymation
+      stop-motion aesthetic.

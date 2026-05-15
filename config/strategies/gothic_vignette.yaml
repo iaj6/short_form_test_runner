@@ -120,8 +120,15 @@ music:
   duck_ratio: 9.0
 
 visuals:
-  # Veo reference-image anchoring — used by extended VeoBackend (pending implementation).
-  # Path is relative to project root. Image is gitignored; sync separately.
+  # Per-segment hero variants. VariantSelectionStage picks one variant per
+  # segment based on the segment's narration + visual_prompt; VisualGenStage
+  # resolves the key to the matching PNG and feeds it to Veo as the base
+  # frame. See data/character_refs/variants.yaml for the available variants.
+  variants_manifest: "data/character_refs/variants.yaml"
+  default_variant: "study"  # fallback when variant selection didn't run or returned an invalid key
+  # Legacy single-image anchor — kept as a final fallback when no variant
+  # resolves (e.g., manifest missing). VisualGenStage uses this only if the
+  # variant resolver returns nothing.
   reference_image: "data/character_refs/bartholomew_hero.png"
   # veo_seed disabled: Gemini API rejects seed for video generation (would need
   # Vertex AI). Reference image is the consistency anchor; seed was belt-and-suspenders.

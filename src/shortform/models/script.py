@@ -33,6 +33,10 @@ class Segment:
     audio_path: str = ""
     image_path: str = ""
 
+    # Hero variant key (set by VariantSelectionStage; consumed by VisualGenStage
+    # to pick the per-segment reference image). Empty = use strategy default.
+    hero_variant: str = ""
+
     # Word-level timings from TTS (for animated subtitles)
     word_timings: list[WordTiming] = field(default_factory=list)
 
@@ -79,6 +83,7 @@ class Script:
                     "visual_prompt": s.visual_prompt,
                     "text_overlay": s.text_overlay,
                     "estimated_duration": s.estimated_duration,
+                    "hero_variant": s.hero_variant,
                 }
                 for s in self.segments
             ],
@@ -98,6 +103,7 @@ class Script:
                 visual_prompt=s.get("visual_prompt", ""),
                 text_overlay=s.get("text_overlay", ""),
                 estimated_duration=len(s["narration"].split()) / 2.5,
+                hero_variant=s.get("hero_variant", ""),
             )
             for s in data["segments"]
         ]

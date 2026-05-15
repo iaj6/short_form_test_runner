@@ -1,17 +1,28 @@
-"""Generate Bartholomew character reference image candidates via Imagen 4.
+"""Generate Bartholomew character reference image candidates via Imagen 4,
+plus per-scene variants via Nano Banana Pro (Gemini 3 Pro Image).
 
 Bartholomew is the clay-skeleton protagonist of the gothic_vignette strategy.
-This script produces N candidate hero images saved to
-data/character_refs/candidates/. Browse them, pick the one that nails the
-character, and copy/rename your pick to data/character_refs/bartholomew_hero.png
-— that's the path the gothic_vignette strategy reads as the Veo base frame.
+This script has two modes:
 
-Usage:
+(1) Generate new hero candidates from scratch (Imagen 4). For when you want
+    to iterate on the locked hero. Outputs to data/character_refs/candidates/.
+
     uv run python scripts/generate_bartholomew.py            # 6 candidates
     uv run python scripts/generate_bartholomew.py --count 4
-    uv run python scripts/generate_bartholomew.py --variant pose
+    uv run python scripts/generate_bartholomew.py --variant standing
 
-Cost: ~$0.04/image with Imagen 4 standard. 6 candidates ~ $0.24.
+(2) Generate scene-variant hero PNGs from the existing locked hero via
+    image editing (Nano Banana Pro). Each variant in
+    data/character_refs/variants.yaml that has an edit_prompt gets rendered.
+    Preserves character identity across scene changes.
+
+    uv run python scripts/generate_bartholomew.py --edit-variants
+    uv run python scripts/generate_bartholomew.py --edit-variants --only kitchen
+    uv run python scripts/generate_bartholomew.py --edit-variants --force
+
+Costs:
+    Imagen 4 standard: ~$0.04/image. 6 candidates ~ $0.24.
+    Nano Banana Pro:   ~$0.04/image. 5 variant edits ~ $0.20.
 """
 
 from __future__ import annotations
@@ -22,12 +33,19 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import yaml
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CANDIDATES_DIR = PROJECT_ROOT / "data" / "character_refs" / "candidates"
+CHARACTER_REFS_DIR = PROJECT_ROOT / "data" / "character_refs"
+CANDIDATES_DIR = CHARACTER_REFS_DIR / "candidates"
+VARIANTS_DIR = CHARACTER_REFS_DIR / "variants"
+VARIANTS_MANIFEST = CHARACTER_REFS_DIR / "variants.yaml"
+LOCKED_HERO = CHARACTER_REFS_DIR / "bartholomew_hero.png"
+
+EDIT_MODEL_DEFAULT = "nano-banana-pro-preview"
 
 # The canonical Bartholomew prompt — anchors the entire series.
 # Avoid naming Tim Burton directly (Imagen sometimes interprets as the person).
@@ -129,19 +147,136 @@ def generate(
     return saved
 
 
+def edit_variant(
+    api_key: str,
+    base_image_path: Path,
+    edit_prompt: str,
+    output_path: Path,
+    model: str = EDIT_MODEL_DEFAULT,
+) -> None:
+    """Generate one scene-variant by editing the locked hero PNG via Nano Banana Pro.
+
+    The edit prompt should describe the target scene while preserving the
+    character. See variants.yaml for canonical phrasing.
+    """
+    client = genai.Client(api_key=api_key)
+
+    image_bytes = base_image_path.read_bytes()
+    base_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+    prompt_part = types.Part.from_text(text=edit_prompt)
+
+    response = client.models.generate_content(
+        model=model,
+        contents=[base_part, prompt_part],
+    )
+
+    if not response.candidates:
+        raise RuntimeError(f"No candidates returned for {output_path.name}")
+
+    parts = response.candidates[0].content.parts or []
+    image_part = next(
+        (p for p in parts if getattr(p, "inline_data", None) is not None),
+        None,
+    )
+    if image_part is None:
+        text_blob = " ".join(
+            (getattr(p, "text", "") or "") for p in parts
+        )[:300]
+        raise RuntimeError(
+            f"No image in response for {output_path.name}. "
+            f"Text fragments: {text_blob!r}"
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(image_part.inline_data.data)
+
+
+def run_edit_variants(
+    api_key: str,
+    manifest_path: Path,
+    only: str | None,
+    force: bool,
+    model: str,
+) -> None:
+    if not manifest_path.exists():
+        print(f"ERROR: variants manifest not found at {manifest_path}")
+        sys.exit(1)
+    if not LOCKED_HERO.exists():
+        print(f"ERROR: locked hero not found at {LOCKED_HERO}")
+        sys.exit(1)
+
+    data = yaml.safe_load(manifest_path.read_text()) or {}
+    variants = data.get("variants", [])
+
+    targets: list[dict] = []
+    for v in variants:
+        if not v.get("edit_prompt"):
+            continue
+        if only and v["key"] != only:
+            continue
+        targets.append(v)
+
+    if not targets:
+        if only:
+            print(f"No variant matching --only '{only}' (or it has no edit_prompt).")
+        else:
+            print("No variants have edit_prompt set — nothing to do.")
+        return
+
+    estimated_cost = 0.04 * len(targets)
+    print(f"Editing {len(targets)} variant(s) via {model}")
+    print(f"Estimated cost: ~${estimated_cost:.2f}\n")
+
+    for v in targets:
+        output_path = CHARACTER_REFS_DIR / v["file"]
+        if output_path.exists() and not force:
+            print(f"  [skip] {v['key']:8} — {output_path.relative_to(PROJECT_ROOT)} exists (use --force to regenerate)")
+            continue
+        print(f"  [edit] {v['key']:8} → {output_path.relative_to(PROJECT_ROOT)}")
+        try:
+            edit_variant(
+                api_key=api_key,
+                base_image_path=LOCKED_HERO,
+                edit_prompt=v["edit_prompt"],
+                output_path=output_path,
+                model=model,
+            )
+            print(f"  [ok]   {v['key']:8} — saved")
+        except RuntimeError as e:
+            print(f"  [FAIL] {v['key']:8} — {e}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--count", type=int, default=6, help="Number of candidates to generate")
+    parser.add_argument("--count", type=int, default=6, help="Number of candidates to generate (Imagen mode)")
     parser.add_argument(
         "--variant",
         choices=list(VARIANTS.keys()),
         default="default",
-        help="Prompt variant — different framing/pose/composition",
+        help="Prompt variant for Imagen mode — different framing/pose/composition",
     )
     parser.add_argument(
         "--model",
         default="imagen-4.0-generate-001",
-        help="Imagen model id (default: imagen-4.0-generate-001)",
+        help="Imagen model id for new-hero generation (default: imagen-4.0-generate-001)",
+    )
+
+    # Edit-variants mode
+    parser.add_argument(
+        "--edit-variants", action="store_true",
+        help="Switch to variant-edit mode: produce scene variants by editing the locked hero.",
+    )
+    parser.add_argument(
+        "--only", default=None,
+        help="In edit mode, render only the variant with this key.",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="In edit mode, overwrite existing variant files.",
+    )
+    parser.add_argument(
+        "--edit-model", default=EDIT_MODEL_DEFAULT,
+        help=f"Image-edit model for variant mode (default: {EDIT_MODEL_DEFAULT})",
     )
     args = parser.parse_args()
 
@@ -150,6 +285,16 @@ def main() -> None:
     if not api_key:
         print("ERROR: GOOGLE_GEMINI_API_KEY not set in .env")
         sys.exit(1)
+
+    if args.edit_variants:
+        run_edit_variants(
+            api_key=api_key,
+            manifest_path=VARIANTS_MANIFEST,
+            only=args.only,
+            force=args.force,
+            model=args.edit_model,
+        )
+        return
 
     prompt = VARIANTS[args.variant]
     print(f"Variant: {args.variant}")

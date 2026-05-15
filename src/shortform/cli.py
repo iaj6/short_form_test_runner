@@ -16,6 +16,7 @@ from shortform.pipeline.runner import PipelineRunner
 from shortform.stages.assembly import AssemblyStage
 from shortform.stages.script_gen import ScriptGenStage
 from shortform.stages.tts import TTSStage
+from shortform.stages.variant_select import VariantSelectionStage
 from shortform.stages.visual_gen import VisualGenStage
 from shortform.store.db import Database
 from shortform.visuals import get_backend, list_backends
@@ -96,7 +97,13 @@ def generate(
     logger.info("Using visual backend: %s", backend.name)
 
     # Build pipeline
-    stages = [ScriptGenStage(), TTSStage(), VisualGenStage(backend=backend), AssemblyStage()]
+    stages = [
+        ScriptGenStage(),
+        VariantSelectionStage(),
+        TTSStage(),
+        VisualGenStage(backend=backend),
+        AssemblyStage(),
+    ]
     runner = PipelineRunner(stages=stages, db=db)
 
     # Create context
@@ -249,7 +256,13 @@ def generate_from_script(
 
     logger.info("Using visual backend: %s", backend.name)
 
-    stages = [ScriptGenStage(), TTSStage(), VisualGenStage(backend=backend), AssemblyStage()]
+    stages = [
+        ScriptGenStage(),
+        VariantSelectionStage(),
+        TTSStage(),
+        VisualGenStage(backend=backend),
+        AssemblyStage(),
+    ]
     runner = PipelineRunner(stages=stages, db=db)
 
     video = Video(

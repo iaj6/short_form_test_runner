@@ -13,7 +13,11 @@ import logging
 import math
 import subprocess
 from pathlib import Path
+from typing import Any
 
+import yaml
+
+from shortform.config import PROJECT_ROOT
 from shortform.models.video import VideoStatus
 from shortform.pipeline.context import PipelineContext
 from shortform.store.file_store import FileStore
@@ -48,7 +52,7 @@ class VisualGenStage:
         vid_cfg = ctx.settings.video
 
         # Merge default visuals config with strategy overrides
-        config: dict[str, object] = {
+        config: dict[str, Any] = {
             "font_size": vis_cfg.font_size,
             "font_color": vis_cfg.font_color,
             "text_margin": vis_cfg.text_margin,
@@ -56,6 +60,12 @@ class VisualGenStage:
             "gradient_bottom": vis_cfg.gradient_bottom,
         }
         config.update(ctx.strategy.visuals)
+
+        # Resolve the optional hero-variant manifest. Strategies that declare
+        # `visuals.variants_manifest` use per-segment reference images chosen
+        # by VariantSelectionStage. Strategies without it use the existing
+        # `reference_image` field unchanged.
+        variant_resolver = _build_variant_resolver(ctx.strategy.visuals)
 
         has_video_clips = False
         # Per-segment clip lists for assembly. Only populated when a video-output
@@ -66,6 +76,18 @@ class VisualGenStage:
 
         for seg in ctx.script.segments:
             video_dir = file_store.video_dir(ctx.video.id)
+            # Per-segment config: same as global config, but override
+            # reference_image based on the segment's selected hero variant.
+            seg_config = dict(config)
+            resolved_ref = variant_resolver(seg.hero_variant)
+            if resolved_ref:
+                seg_config["reference_image"] = resolved_ref
+                logger.info(
+                    "Segment %d hero variant '%s' → %s",
+                    seg.index, seg.hero_variant or "(default)",
+                    Path(resolved_ref).name,
+                )
+
             # Always generate clip 0 first so we can see the output type before
             # deciding whether to generate more.
             first_output = video_dir / f"segment_{seg.index:02d}"
@@ -78,7 +100,7 @@ class VisualGenStage:
                 output_path=first_output,
                 width=vid_cfg.width,
                 height=vid_cfg.height,
-                config=config,
+                config=seg_config,
             )
             seg.image_path = str(first_result.path)
             segment_types = ctx.artifacts.setdefault("segment_visual_types", {})
@@ -117,7 +139,7 @@ class VisualGenStage:
                         else f"segment_{seg.index:02d}_lastframe.png"
                     )
                     _extract_last_frame(prev_clip, last_frame)
-                    chain_config = {**config, "chain_from": str(last_frame)}
+                    chain_config = {**seg_config, "chain_from": str(last_frame)}
 
                     extra_output = (
                         video_dir / f"segment_{seg.index:02d}_clip_{extra_idx:02d}"
@@ -153,7 +175,7 @@ class VisualGenStage:
                             output_path=extra_output,
                             width=vid_cfg.width,
                             height=vid_cfg.height,
-                            config=config,  # no chain_from → falls back to reference_image
+                            config=seg_config,  # no chain_from → falls back to per-segment hero
                         )
                         if extra_result.output_type != VisualOutputType.VIDEO:
                             logger.warning(
@@ -192,6 +214,42 @@ class VisualGenStage:
             total_clips, len(ctx.script.segments), self._backend.name,
         )
         return ctx
+
+
+def _build_variant_resolver(strategy_visuals: dict[str, Any]):
+    """Return a fn(variant_key) -> reference_image_path-or-None.
+
+    If the strategy declares a `variants_manifest`, the resolver maps a
+    segment's `hero_variant` key to the absolute file path of the matching
+    PNG. Falls back to the strategy's `reference_image` (singular) when the
+    key isn't set or when the manifest isn't configured — preserving the
+    pre-variants behavior for other strategies.
+    """
+    manifest_rel = strategy_visuals.get("variants_manifest")
+    default_key = strategy_visuals.get("default_variant", "")
+    fallback_ref = strategy_visuals.get("reference_image", "")
+
+    variants_by_key: dict[str, str] = {}
+    manifest_dir: Path | None = None
+    if manifest_rel:
+        manifest_path = PROJECT_ROOT / manifest_rel
+        if manifest_path.exists():
+            manifest = yaml.safe_load(manifest_path.read_text()) or {}
+            manifest_dir = manifest_path.parent
+            for v in manifest.get("variants", []):
+                variants_by_key[v["key"]] = v["file"]
+        else:
+            logger.warning("variants_manifest %s not found", manifest_path)
+
+    def resolve(variant_key: str) -> str:
+        # Prefer the per-segment variant if it maps to a real file
+        candidate_key = variant_key or default_key
+        if candidate_key and candidate_key in variants_by_key and manifest_dir:
+            return str(manifest_dir / variants_by_key[candidate_key])
+        # Fall back to the strategy's singular reference_image (legacy path)
+        return fallback_ref
+
+    return resolve
 
 
 def _extract_last_frame(video_path: Path, output_path: Path) -> None:
