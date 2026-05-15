@@ -7,18 +7,25 @@ Short-form video generation pipeline targeting YouTube Shorts and Instagram Reel
 Linear stages with SQLite checkpointing. Resume-from-stage supported.
 
 ```
-ScriptGenStage  →  TTSStage         →  VisualGenStage  →  AssemblyStage  →  (PublishStage — stub)
-   (Claude)       (Edge / F5-TTS)     (Veo / Pillow)      (FFmpeg)
+ScriptGenStage → VariantSelectionStage → TTSStage         → VisualGenStage    → AssemblyStage  → (PublishStage — stub)
+   (Claude)        (Claude — per-segment    (Edge / F5-TTS)    (Veo / Pillow,      (FFmpeg)
+                    hero variants)                              multi-clip + chained)
 ```
 
+Two CLI entry points to this pipeline:
+- `shortform generate -s <strategy>` — full closed-loop run (script → TTS → visuals → assembly).
+- `shortform script -s <strategy>` followed by `shortform generate-from-script <path>` — editorial gate. Script JSON is written to `data/scripts/<id>.json` for review/edit; the second command picks up from where the script left off via `resume_from="script_gen"`.
+
 Key files:
-- `src/shortform/pipeline/runner.py` — orchestration, checkpointing
+- `src/shortform/pipeline/runner.py` — orchestration, checkpointing, `resume_from` skip semantics
 - `src/shortform/stages/` — one module per stage
+- `src/shortform/stages/variant_select.py` — picks per-segment hero variant from a manifest via Claude tool-use; no-op when the strategy doesn't declare `visuals.variants_manifest`
 - `src/shortform/tts/` — pluggable TTS backends (Edge, F5-TTS); strategy picks via `tts.backend`
-- `src/shortform/visuals/` — pluggable backends (Pillow, Veo; Grok stub)
-- `src/shortform/stages/assembly.py` — the heavyweight: FFmpeg, animated subtitles, sidechain music ducking, Ken Burns on stills, crossfade transitions
-- `config/strategies/*.yaml` — strategy-specific prompts, voices, visual style, music category
+- `src/shortform/visuals/` — pluggable backends (Pillow, Veo; Grok stub); Veo is on `veo-3.1-generate-preview` by default
+- `src/shortform/stages/assembly.py` — the heavyweight: FFmpeg with timebase+framerate+format normalization before xfade, multi-clip concat per segment, sidechain music ducking, Ken Burns on stills, animated subtitles
+- `config/strategies/*.yaml` — strategy-specific prompts, voices, visual style, variants manifest pointer, music category
 - `config/default.yaml` — base settings
+- `data/character_refs/variants.yaml` — manifest of 6 Bartholomew hero variants (study/laptop/kitchen/grocer/phone/window); the source-of-truth list that VariantSelectionStage picks from
 
 ## Current Strengths
 
@@ -61,12 +68,21 @@ Output reads as "AI short-form" because:
 
 ## Build Order (de-risk hardest thing first)
 
-1. ~~F5-TTS proof-of-concept~~ ✓ **DONE** (2026-05-12) — voice clone sells the gothic-deadpan concept; greenlit. Pipeline integration also landed: `src/shortform/tts/f5_backend.py` subprocesses `~/.venvs/f5-tts/bin/f5-tts_infer-cli` per segment; `gothic_vignette.yaml` opts in via its `tts:` block. First-segment cold start is ~3min on M4 (model load + JIT). See "F5-TTS Setup Notes" below for install + the 12s ref-audio gotcha.
-2. ~~Character reference image (Imagen via Gemini API)~~ **DONE** — locked at `data/character_refs/bartholomew_hero.png`. Generation script lives at `scripts/generate_bartholomew.py` (run with variants `--variant no_hat|wider|closer|standing` for alternate framing). Candidates pool is gitignored.
-3. ~~`gothic_vignette.yaml` strategy config~~ **DONE** — `config/strategies/gothic_vignette.yaml` has system prompt with the six canonical Bartholomew vignettes baked in as few-shot examples, 26 modern-dread topics, Veo reference/seed fields wired, and now a `tts:` block selecting `f5_tts` with the ref_audio/ref_text/model params.
-4. ~~Veo backend: reference-image anchoring + seed control~~ **DONE** — `src/shortform/visuals/veo_backend.py` reads `reference_image`, `veo_seed`, `veo_negative_prompt` from strategy config. Falls back to Pillow gradient gracefully when reference file missing. Tests in `tests/test_visuals.py`.
-5. ~~Source gothic/melancholic royalty-free music~~ **DONE on the Air** — `data/music/gothic/tracks.yaml` lists 6 tracks with URLs/licenses/attribution. All 6 audio files downloaded locally. Future selector logic can read the manifest to match tracks to vignettes by mood/tempo/intensity and auto-include attribution lines in publish descriptions (current `assembly.py` still picks randomly from all audio in the directory — manifest is advisory until selector lands).
-6. **End-to-end test:** one full ~30s video — now unblocked. Next concrete step.
+1. ~~F5-TTS proof-of-concept + pipeline integration~~ **DONE** (2026-05-12). Voice clone sells the gothic-deadpan concept; pipeline subprocesses `~/.venvs/f5-tts/bin/f5-tts_infer-cli` per segment. F5-TTS has a SIGSEGV-at-MPS-load transient on Apple Silicon (exit -11) — retry is now built in (`SUBPROCESS_MAX_ATTEMPTS = 2`). See "F5-TTS Setup Notes" below.
+2. ~~Character reference image + variant library~~ **DONE**. Locked hero at `data/character_refs/bartholomew_hero.png` (Imagen 4 generation, `scripts/generate_bartholomew.py`). On 2026-05-14 we added 5 scene-variant siblings via Nano Banana Pro image-editing (study/laptop/kitchen/grocer/phone/window) — the same character preserved exactly (skull-crack, bowtie, wardrobe), different scenes. Generation via `scripts/generate_bartholomew.py --edit-variants`.
+3. ~~`gothic_vignette.yaml` strategy config~~ **DONE**. Has the system prompt with six canonical Bartholomew vignettes as few-shot examples, 26 modern-dread topics, `tts.backend: f5_tts` with ref_audio/ref_text params, and `visuals.variants_manifest: data/character_refs/variants.yaml` for per-segment hero selection.
+4. ~~Veo backend~~ **DONE** with substantial robustness. Reads `reference_image` from per-segment config (set by VisualGenStage's variant resolver). On `veo-3.1-generate-preview`. Has retry layers for: 5xx transient errors (8s base backoff, 4 attempts), 429 rate-limit (30s base backoff, 4 attempts), safety-filter rejections (1 retry before falling back to Pillow). Fails fast on 429 when the message indicates depleted credits rather than rate-limit. `veo_seed` is no-op via Gemini API (would need Vertex AI).
+5. ~~Multi-clip per segment + last-frame chaining + scene-coherence via variants~~ **DONE** (2026-05-13 to 14). Veo is hard-locked at ~8s per clip; F5-TTS narrates 12-22s per segment; the gap is bridged by generating ceil(audio_duration / 7.5) Veo clips per segment, chained via last-frame extraction so motion is continuous across sub-clip boundaries. Variant system added on 2026-05-14: each segment uses a scene-matched hero variant instead of always morphing the locked study scene. Validated to eliminate the safety-filter rejections that "skeletal hands in a kitchen" prompts were triggering.
+6. ~~Royalty-free music sourcing~~ **DONE** locally. `data/music/gothic/tracks.yaml` + 6 downloaded MP3s. Selector logic to match tracks per-vignette by mood is not yet built; `assembly.py` still picks randomly. Tracked as Phase 2 work below.
+7. ~~End-to-end test~~ **DONE**. 7+ Bartholomew videos generated across the two days; one ("The Colleague") manually uploaded to the channel.
+8. ~~First YouTube Short published~~ **DONE** (2026-05-13). Channel: https://www.youtube.com/channel/UCH0aAvB6yTWic68j2Q0gsvg. Manual upload via youtube.com/upload while logged into the channel's Google account; automation deferred (see Phase 2).
+
+**Phase 2 (next, when motivated):**
+- **Music selector** — read `tracks.yaml` mood tags + segment narration, match track per video. Cheap quality win.
+- **Publish automation** — YT Data API v3 OAuth flow + `src/shortform/stages/publish.py` implementation. ~5-6 hours; deferred until the channel proves it has any organic reach.
+- **Cost optimization** — narration is currently 16-22s per segment which forces 2-3 Veo clips; pushing toward 12-14s segments would drop ~30% of Veo cost per video.
+- **Whisper subtitle alignment** — F5-TTS doesn't emit word timings; the existing animated-subtitle path in assembly is dead-code for the gothic strategy. Post-hoc Whisper alignment would re-enable it.
+- **Alternate visual backends** — Kling for safety-filter-tight content (looser filters than Veo), or local open-source models for cost-free generation (Phase 0 attempt of HunyuanVideo I2V on M2 Pro thrashed at 32GB — see `docs/m2_pro_phase_0_handoff.md`).
 
 ## Machine Topology
 
@@ -93,6 +109,18 @@ These paths are gitignored and need recreating or syncing:
 - `data/*.db` — SQLite state, machine-specific.
 - `data/voices/` — F5-TTS reference audio + per-machine test outputs. Current locked reference: `data/voices/bartholomew_reference_trimmed.wav` (9.7s) with matching `bartholomew_reference.txt` (the ref_text). Also `data/voices/bartholomew_reference.m4a` (the full 54s original).
 - `~/.venvs/f5-tts/` — separate uv-managed Python 3.12 venv with `f5-tts` installed from PyPI. Set up with: `uv venv ~/.venvs/f5-tts --python 3.12 && uv pip install --python ~/.venvs/f5-tts/bin/python f5-tts`. Lives outside the repo by design (heavy ML stack).
+
+## Retry Layers (each one was added after a real failure — don't speculatively remove)
+
+The pipeline accumulated four retry layers over the active development period. Each handles a different class of transient:
+
+- **Veo 5xx (`_submit_with_retry` in veo_backend.py)** — 4 attempts, 8s base exponential backoff. Added after a 503 killed run 2 of the first end-to-end pipeline.
+- **Veo 429 rate-limit (same retry path, longer backoff)** — 30s base, 4 attempts. Added after a 3-video batch hit the per-minute Gemini quota.
+- **Veo 429 credits-depleted (fail-fast variant)** — sniffs the error message for "credits"/"depleted"/"billing" and skips retry. Added after the 30s × 4 backoff wasted 7.5 minutes retrying a non-retryable balance issue.
+- **Veo safety-filter rejection (retry in `VeoBackend.generate`)** — 2 attempts. Veo's safety filter is statistical; same prompt + ref image often succeeds on retry. Added after "The Dishwasher" had 2/3 segments fall back to Pillow gradients due to filter trips.
+- **F5-TTS subprocess (`SUBPROCESS_MAX_ATTEMPTS` in f5_backend.py)** — 2 attempts. F5-TTS occasionally segfaults at MPS model load on Apple Silicon (exit -11). Same input usually succeeds on retry.
+
+ffmpeg gotchas baked into `assembly.py`: per-input normalization before xfade chains via `settb=AVTB,setpts=PTS-STARTPTS,fps=N,scale=W:H,format=PIXFMT` (video) and `asettb=AVTB,asetpts=PTS-STARTPTS,aresample=R` (audio). Veo's outputs vary in timebase (1/12288 vs 1/15360 seen) and framerate (24 vs 25 fps seen) across calls; both trip xfade without normalization.
 
 ## Key Decisions Already Made (don't re-debate without cause)
 
