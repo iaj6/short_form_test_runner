@@ -8,7 +8,8 @@ content:
   target_duration: 30
   segments: 3
 
-# Voice: F5-TTS cloned from the user's theatrical reference recording.
+# Voice: F5-TTS cloned from a theatrical reference recording (in data/voices/,
+# gitignored — supply your own ~6-12s WAV + matching transcript).
 # ref_audio + ref_text must match (the reference clip says exactly the ref_text).
 # The trimmed reference is preferred — F5-TTS works best with 6-12s reference audio.
 tts:

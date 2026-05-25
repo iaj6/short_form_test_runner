@@ -38,6 +38,10 @@ data/moments/
 # Generated scripts for review/edit before commit to TTS+visuals stages
 data/scripts/
 
+# Pipeline run logs (verbose ffmpeg + API debug; can contain account-specific
+# error messages). Keep them local for debugging, don't commit.
+logs/
+
 # IDE
 .idea/
 .vscode/
