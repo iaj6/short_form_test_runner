@@ -13,6 +13,7 @@ from shortform.models.script import Script
 from shortform.models.video import Video
 from shortform.pipeline.context import PipelineContext
 from shortform.pipeline.runner import PipelineRunner
+from shortform.pipeline.stage import PipelineStage
 from shortform.stages.assembly import AssemblyStage
 from shortform.stages.script_gen import ScriptGenStage
 from shortform.stages.tts import TTSStage
@@ -97,7 +98,7 @@ def generate(
     logger.info("Using visual backend: %s", backend.name)
 
     # Build pipeline
-    stages = [
+    stages: list[PipelineStage] = [
         ScriptGenStage(),
         VariantSelectionStage(),
         TTSStage(),
@@ -184,12 +185,15 @@ def script(
     typer.echo(f"  ID:       {ctx.script.id}")
     typer.echo(f"  Title:    {ctx.script.title}")
     typer.echo(f"  Topic:    {ctx.script.topic}")
-    typer.echo(f"  Segments: {ctx.script.segment_count} (~{ctx.script.total_duration:.1f}s estimated)")
+    est_dur = ctx.script.total_duration
+    typer.echo(f"  Segments: {ctx.script.segment_count} (~{est_dur:.1f}s estimated)")
     typer.echo("")
     for seg in ctx.script.segments:
         typer.echo(f"  [{seg.index}] ({seg.estimated_duration:.1f}s) {seg.narration}")
         if seg.visual_prompt:
-            typer.echo(f"      visual: {seg.visual_prompt[:90]}{'...' if len(seg.visual_prompt) > 90 else ''}")
+            vp = seg.visual_prompt
+            ellipsis = "..." if len(vp) > 90 else ""
+            typer.echo(f"      visual: {vp[:90]}{ellipsis}")
     typer.echo("")
     typer.echo(f"Next: uv run shortform generate-from-script '{out_path}'")
 
@@ -256,7 +260,7 @@ def generate_from_script(
 
     logger.info("Using visual backend: %s", backend.name)
 
-    stages = [
+    stages: list[PipelineStage] = [
         ScriptGenStage(),
         VariantSelectionStage(),
         TTSStage(),
@@ -285,7 +289,10 @@ def generate_from_script(
         script_path.name, video.id,
     )
 
-    ctx = asyncio.run(runner.run(ctx, resume_from="script_gen"))
+    # Reference the stage's own name rather than a bare literal so a rename of
+    # ScriptGenStage.name can't silently turn this into a no-op (the runner now
+    # also fails loudly if resume_from matches no stage).
+    ctx = asyncio.run(runner.run(ctx, resume_from=stages[0].name))
 
     if ctx.errors:
         typer.echo(f"\nPipeline failed: {ctx.errors[-1]}", err=True)

@@ -47,6 +47,14 @@ DEFAULT_MODEL = "F5TTS_v1_Base"
 # pressure mid-load can cause them and they similarly clear on a second try.
 SUBPROCESS_MAX_ATTEMPTS = 2
 
+# Hard wall-clock ceiling per inference invocation. Cold start (model load) can
+# legitimately take ~3 min, but under memory/disk pressure the MPS load can
+# *hang* rather than segfault — and subprocess.run with no timeout would block
+# the entire async pipeline forever with no recovery. 10 min is generous
+# headroom over a healthy cold start; a hang is then treated as a failed
+# attempt (retried once, then raised cleanly) like any other transient failure.
+SUBPROCESS_TIMEOUT_SECONDS = 600
+
 
 class F5TTSBackend:
     """F5-TTS via subprocess to its dedicated venv."""
@@ -115,7 +123,30 @@ class F5TTSBackend:
             )
             result: subprocess.CompletedProcess[str] | None = None
             for attempt in range(1, SUBPROCESS_MAX_ATTEMPTS + 1):
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                    )
+                except subprocess.TimeoutExpired:
+                    # A hang (not just a non-zero exit) — treat like a transient
+                    # failure: retry once, then fail cleanly instead of blocking
+                    # the pipeline forever.
+                    logger.warning(
+                        "F5-TTS segment %d timed out after %ds (attempt %d/%d), retrying...",
+                        segment.index, SUBPROCESS_TIMEOUT_SECONDS, attempt,
+                        SUBPROCESS_MAX_ATTEMPTS,
+                    )
+                    result = None
+                    if attempt < SUBPROCESS_MAX_ATTEMPTS:
+                        continue
+                    raise RuntimeError(
+                        f"f5-tts_infer-cli timed out after {SUBPROCESS_MAX_ATTEMPTS} "
+                        f"attempts ({SUBPROCESS_TIMEOUT_SECONDS}s each) on segment "
+                        f"{segment.index}"
+                    ) from None
                 if result.returncode == 0:
                     break
                 if attempt < SUBPROCESS_MAX_ATTEMPTS:

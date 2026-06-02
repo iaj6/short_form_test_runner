@@ -14,9 +14,7 @@ to keep in the pipeline for all strategies, not just gothic_vignette.
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 from typing import Any
 
 import anthropic

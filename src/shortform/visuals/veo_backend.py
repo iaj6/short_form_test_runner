@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,13 @@ VEO_RETRY_BASE_DELAY_429_SECONDS = 30
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 10
+
+# Wall-clock ceiling on a single generation's polling. An 8s Veo clip typically
+# finishes in 1-3 min; 15 min is generous headroom. Without it, a server-side
+# operation that never reports done (or operations.get returning a perpetually
+# not-done handle) spins forever, hanging the entire unattended run. On timeout
+# we raise — VeoBackend.generate turns that into a clean Pillow fallback.
+VEO_POLL_TIMEOUT_SECONDS = 900
 
 
 class VeoBackend:
@@ -259,8 +267,15 @@ async def _generate_video(
         config=types.GenerateVideosConfig(**config_kwargs),
     )
 
-    # Poll until done
+    # Poll until done, bounded by a wall-clock deadline so a stuck operation
+    # can't hang the pipeline forever.
+    deadline = time.monotonic() + VEO_POLL_TIMEOUT_SECONDS
     while not operation.done:
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                f"Veo generation polling exceeded {VEO_POLL_TIMEOUT_SECONDS}s "
+                f"deadline for prompt: {prompt[:120]}"
+            )
         logger.debug("Waiting for Veo generation to complete...")
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
         operation = client.operations.get(operation)
