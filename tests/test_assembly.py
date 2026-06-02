@@ -22,6 +22,8 @@ from shortform.pipeline.context import PipelineContext
 from shortform.stages import assembly
 from shortform.stages.assembly import (
     AssemblyStage,
+    _apply_master,
+    _build_grade_filter,
     _group_words_into_phrases,
     _mix_background_music,
     _mux_video_with_audio,
@@ -282,3 +284,74 @@ def test_validate_passes_when_all_sub_clips_present(tmp_path: Path):
     errors = AssemblyStage().validate(ctx)
     # No sub-clip error (ffmpeg-availability error may still appear in CI).
     assert not any("sub-clip" in e for e in errors)
+
+
+# --- color grade + master pass (#2) -------------------------------------------
+
+
+def test_build_grade_filter_none_is_empty():
+    assert _build_grade_filter(None) == ""
+    assert _build_grade_filter({}) == ""
+
+
+def test_build_grade_filter_gothic_look():
+    grade = {
+        "contrast": 1.08,
+        "saturation": 0.80,
+        "gamma": 0.94,
+        "shadow_cool": 0.06,
+        "highlight_warm": 0.05,
+        "vignette": True,
+    }
+    f = _build_grade_filter(grade)
+    assert "eq=contrast=1.08:saturation=0.8:gamma=0.94" in f
+    # shadow_cool pushes shadows blue (bs+) and off-red (rs-); highlight_warm warms highlights.
+    assert "colorbalance=bs=0.06:rs=-0.0300:rh=0.05:bh=-0.0250" in f
+    assert "vignette=PI/5" in f
+
+
+def test_apply_master_grade_and_loudnorm(tmp_path: Path):
+    captured: dict[str, list[str]] = {}
+    with patch.object(assembly, "_run_ffmpeg", side_effect=lambda a: captured.update(args=a)):
+        _apply_master(
+            input_path=tmp_path / "pre.mp4",
+            output_path=tmp_path / "out.mp4",
+            grade_filter="eq=contrast=1.1,vignette=PI/5",
+            loudnorm=True,
+            loudnorm_lufs=-14.0,
+            video_bitrate="8M",
+            pixel_format="yuv420p",
+            preset="medium",
+            audio_bitrate="192k",
+            audio_sample_rate=44100,
+        )
+    args = captured["args"]
+    # Grade present → video re-encoded with the filter, not copied.
+    assert "-vf" in args
+    assert args[args.index("-vf") + 1] == "eq=contrast=1.1,vignette=PI/5"
+    assert "libx264" in args
+    # Loudnorm present → audio filtered to the target LUFS.
+    assert "-af" in args
+    assert "loudnorm=I=-14.0:TP=-1.5:LRA=11" in args[args.index("-af") + 1]
+
+
+def test_apply_master_no_grade_copies_video(tmp_path: Path):
+    captured: dict[str, list[str]] = {}
+    with patch.object(assembly, "_run_ffmpeg", side_effect=lambda a: captured.update(args=a)):
+        _apply_master(
+            input_path=tmp_path / "pre.mp4",
+            output_path=tmp_path / "out.mp4",
+            grade_filter="",
+            loudnorm=False,
+            loudnorm_lufs=-14.0,
+            video_bitrate="8M",
+            pixel_format="yuv420p",
+            preset="medium",
+            audio_bitrate="192k",
+            audio_sample_rate=44100,
+        )
+    args = captured["args"]
+    assert "-vf" not in args
+    assert "-af" not in args
+    # Both streams copied when nothing to do.
+    assert args.count("copy") == 2

@@ -25,6 +25,8 @@ video:
   preset: "medium"
   min_duration: 15
   max_duration: 60
+  loudnorm: true              # EBU R128 loudness normalization on the final master
+  loudnorm_lufs: -14.0        # integrated target (YouTube/IG streaming standard)
 
 visuals:
   font_size: 64
