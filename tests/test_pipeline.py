@@ -100,3 +100,57 @@ async def test_pipeline_validation_failure(db: Database):
     result = await runner.run(ctx)
     assert result.completed_stages == ["a"]
     assert result.video.status == VideoStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_resume_from_skips_up_to_and_including(db: Database):
+    stages = [PassStage("a"), PassStage("b"), PassStage("c")]
+    runner = PipelineRunner(stages=stages, db=db)
+
+    video = Video()
+    db.save_video(video)
+    ctx = PipelineContext(video=video)
+
+    result = await runner.run(ctx, resume_from="a")
+    # "a" is skipped (up to AND including); only b and c run.
+    assert result.completed_stages == ["b", "c"]
+    assert "a" not in result.artifacts
+    assert result.artifacts == {"b": "done", "c": "done"}
+    assert not result.errors
+    assert result.video.completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_from_unknown_stage_fails_loudly(db: Database):
+    """A resume_from matching no stage must NOT silently skip everything and
+    report success — it must fail with an error and never mark completed."""
+    stages = [PassStage("a"), PassStage("b")]
+    runner = PipelineRunner(stages=stages, db=db)
+
+    video = Video()
+    db.save_video(video)
+    ctx = PipelineContext(video=video)
+
+    result = await runner.run(ctx, resume_from="does_not_exist")
+    assert result.video.status == VideoStatus.FAILED
+    assert result.completed_stages == []
+    assert any("matches no stage" in e for e in result.errors)
+    assert result.video.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_resume_from_last_stage_runs_nothing_and_fails(db: Database):
+    """Resuming from the final stage skips every stage → zero ran → FAILED,
+    rather than a 'successful' run with no output."""
+    stages = [PassStage("a"), PassStage("b"), PassStage("c")]
+    runner = PipelineRunner(stages=stages, db=db)
+
+    video = Video()
+    db.save_video(video)
+    ctx = PipelineContext(video=video)
+
+    result = await runner.run(ctx, resume_from="c")
+    assert result.video.status == VideoStatus.FAILED
+    assert result.completed_stages == []
+    assert any("zero stages" in e for e in result.errors)
+    assert result.video.completed_at is None

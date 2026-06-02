@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from shortform.config import MusicConfig, PROJECT_ROOT
+from shortform.config import PROJECT_ROOT, MusicConfig
 from shortform.models.script import Segment, WordTiming
 from shortform.models.video import VideoStatus
 from shortform.pipeline.context import PipelineContext
@@ -26,11 +26,29 @@ class AssemblyStage:
 
     def validate(self, ctx: PipelineContext) -> list[str]:
         errors: list[str] = []
+        segment_types = ctx.artifacts.get("segment_visual_types", {})
+        segment_clip_lists: dict[int, list[str]] = ctx.artifacts.get("segment_clips", {})
+
         for seg in ctx.script.segments:
             if not seg.audio_path or not Path(seg.audio_path).exists():
                 errors.append(f"Segment {seg.index}: missing audio at {seg.audio_path}")
             if not seg.image_path or not Path(seg.image_path).exists():
                 errors.append(f"Segment {seg.index}: missing visual at {seg.image_path}")
+
+            # Multi-clip VIDEO segments concat from segment_clips[seg.index]; the
+            # sub-clips beyond clip 0 (== image_path) aren't covered by the check
+            # above. On a resume against a cleaned asset dir a missing sub-clip
+            # would otherwise pass validate() and fail deep in ffmpeg with an
+            # opaque error.
+            if segment_types.get(seg.index) == VisualOutputType.VIDEO:
+                sub_clips = segment_clip_lists.get(seg.index, [])
+                if len(sub_clips) > 1:
+                    for ci, clip in enumerate(sub_clips):
+                        p = Path(clip)
+                        if not p.exists() or p.stat().st_size == 0:
+                            errors.append(
+                                f"Segment {seg.index}: missing/empty sub-clip {ci} at {clip}"
+                            )
 
         # Check ffmpeg is available
         try:
@@ -163,12 +181,18 @@ class AssemblyStage:
             if music_track:
                 strategy_volume = ctx.strategy.music.get("volume")
                 strategy_duck = ctx.strategy.music.get("duck_volume")
+                music_volume = (
+                    strategy_volume if strategy_volume is not None else music_cfg.volume
+                )
+                duck_volume = (
+                    strategy_duck if strategy_duck is not None else music_cfg.duck_volume
+                )
                 _mix_background_music(
                     video_path=assembled_path,
                     music_path=music_track,
                     output_path=output_path,
-                    music_volume=strategy_volume if strategy_volume is not None else music_cfg.volume,
-                    duck_volume=strategy_duck if strategy_duck is not None else music_cfg.duck_volume,
+                    music_volume=music_volume,
+                    duck_volume=duck_volume,
                     fade_in=music_cfg.fade_in,
                     fade_out=music_cfg.fade_out,
                     audio_bitrate=vid_cfg.audio_bitrate,
@@ -391,25 +415,41 @@ def _mux_video_with_audio(
 ) -> None:
     """Mux a pre-animated video clip with its audio track.
 
-    Applies a short audio fade-out before the -shortest cutoff so the
-    inter-segment crossfade doesn't inherit a hard audio boundary.
+    Applies a short audio fade-out before the cutoff so the inter-segment
+    crossfade doesn't inherit a hard audio boundary.
 
-    The fade anchors to min(audio, video) duration — historically video was
-    always shorter than audio (Veo's 8s clips vs F5-TTS's 14-20s narration),
-    which silently truncated the narration. With the multi-clip path video
-    is now usually longer than audio, so the cutoff is the audio length.
+    The multi-clip path usually makes the video at least as long as the
+    narration, but a degraded run (chained-clip generation failed twice,
+    leaving a single ~8s Veo clip against 14-20s of F5-TTS) can leave the
+    video shorter. We must NOT let -shortest truncate the audio in that case —
+    that silently drops the back half of the narration. Instead we hold the
+    video's last frame (tpad clone) out to the narration length so all speech
+    is preserved.
     """
     video_duration = _probe_duration(video_path)
     audio_duration = _probe_duration(audio_path)
-    output_duration = min(video_duration, audio_duration)
     fade_ms = 0.05  # 50ms micro-fade — imperceptible but prevents pops
+
+    if video_duration + fade_ms < audio_duration:
+        pad = audio_duration - video_duration
+        logger.warning(
+            "Segment video (%.1fs) shorter than narration (%.1fs); holding last "
+            "frame for %.1fs so no speech is truncated",
+            video_duration, audio_duration, pad,
+        )
+        output_duration = audio_duration
+        video_filter = f"[0:v]tpad=stop_mode=clone:stop_duration={pad:.3f}[vout]"
+    else:
+        output_duration = min(video_duration, audio_duration)
+        video_filter = "[0:v]copy[vout]"
+
     fade_start = max(0, output_duration - fade_ms)
 
     _run_ffmpeg([
         "-i", str(video_path),
         "-i", str(audio_path),
         "-filter_complex",
-        f"[0:v]copy[vout];[1:a]afade=t=out:st={fade_start:.3f}:d={fade_ms}[aout]",
+        f"{video_filter};[1:a]afade=t=out:st={fade_start:.3f}:d={fade_ms}[aout]",
         "-map", "[vout]",
         "-map", "[aout]",
         "-c:v", "libx264",
@@ -439,8 +479,16 @@ def _create_segment_clip(
     preset: str,
 ) -> None:
     """Create a video clip from a still image + audio with Ken Burns zoom."""
-    # Use ffprobe for authoritative audio duration
-    audio_duration = _probe_duration(audio_path)
+    # Use ffprobe for authoritative audio duration, but for a still-image clip
+    # a probe failure isn't fatal — fall back to the estimated duration so Ken
+    # Burns still renders rather than aborting the whole assembly.
+    try:
+        audio_duration = _probe_duration(audio_path)
+    except RuntimeError:
+        logger.warning(
+            "ffprobe failed on %s; using estimated duration %.1fs", audio_path, duration
+        )
+        audio_duration = duration
     if audio_duration <= 0:
         audio_duration = duration  # fallback to estimated
 
@@ -659,7 +707,15 @@ def _remux_with_faststart(input_path: Path, output_path: Path) -> None:
 
 
 def _probe_duration(path: Path) -> float:
-    """Get the duration of a media file using ffprobe."""
+    """Get the duration of a media file using ffprobe.
+
+    Raises RuntimeError on ffprobe failure or unparseable output rather than
+    silently returning 0.0 — a zero duration poisons every downstream
+    calculation (xfade offsets go negative, the -shortest mux cutoff becomes
+    0, the music atrim length becomes 0), turning a genuinely broken/missing
+    input into a silent-but-wrong render. Callers that have a meaningful
+    fallback (e.g. an estimated duration for a still image) should catch this.
+    """
     result = subprocess.run(
         [
             "ffprobe", "-v", "quiet",
@@ -670,10 +726,18 @@ def _probe_duration(path: Path) -> float:
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe failed for {path} (exit {result.returncode}): "
+            f"{result.stderr.strip()[:300]}"
+        )
+    out = result.stdout.strip()
     try:
-        return float(result.stdout.strip())
-    except ValueError:
-        return 0.0
+        return float(out)
+    except ValueError as e:
+        raise RuntimeError(
+            f"ffprobe returned an unparseable duration for {path}: {out!r}"
+        ) from e
 
 
 def _pick_music_track(music_cfg: MusicConfig, category: str) -> Path | None:
@@ -710,6 +774,14 @@ def _mix_background_music(
     # 4. Sidechain compress: duck music when narration audio is present
     fade_out_start = max(0, video_duration - fade_out)
 
+    # amix weights the already-ducked music relative to the narration. The
+    # weight is duck_volume/music_volume because the music stream was already
+    # scaled by music_volume upstream; this cancels back to duck_volume. Guard
+    # against music_volume == 0 (a valid "mute the bed" config that is not None,
+    # so it slips past the caller's None check) — otherwise this is a
+    # ZeroDivisionError in the terminal assembly stage after all generation.
+    duck_weight = duck_volume / music_volume if music_volume else 0.0
+
     # The narration is [0:a], music is [1:a]
     # sidechaincompress: music (source) is ducked by narration (sidechain)
     # threshold=0.02 = duck when narration exceeds ~-34dB (catches all speech)
@@ -724,7 +796,7 @@ def _mix_background_music(
         f"[music][0:a]sidechaincompress="
         f"threshold=0.02:ratio=5:attack=0.1:release=0.5:level_sc=1"
         f"[ducked];"
-        f"[0:a][ducked]amix=inputs=2:duration=first:weights=1 {duck_volume / music_volume:.2f}"
+        f"[0:a][ducked]amix=inputs=2:duration=first:weights=1 {duck_weight:.2f}"
         f"[aout]"
     )
 

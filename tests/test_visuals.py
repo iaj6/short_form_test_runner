@@ -153,7 +153,7 @@ async def test_veo_uses_reference_image_when_present(tmp_path: Path):
         Path(output_path).write_bytes(b"fake-mp4")
 
     with patch("shortform.visuals.veo_backend._generate_video", side_effect=fake_generate_video):
-        with patch("shortform.visuals.veo_backend.PillowBackend") as MockPillow:
+        with patch("shortform.visuals.veo_backend.PillowBackend") as mock_pillow:
             await backend.generate(
                 segment=segment,
                 output_path=tmp_path / "seg",
@@ -166,7 +166,7 @@ async def test_veo_uses_reference_image_when_present(tmp_path: Path):
                 },
             )
 
-            MockPillow.assert_not_called()  # reference image used directly
+            mock_pillow.assert_not_called()  # reference image used directly
 
     assert captured["image_path"] == ref_image
     assert captured["seed"] == 314159
@@ -197,3 +197,39 @@ async def test_veo_falls_back_to_pillow_when_reference_image_missing(tmp_path: P
     # Pillow gradient base frame should have been written alongside the mp4
     assert (tmp_path / "seg.png").exists()
     assert output.output_type == VisualOutputType.VIDEO
+
+
+@pytest.mark.asyncio
+async def test_veo_poll_loop_times_out(tmp_path: Path):
+    """A generation operation that never reports done must raise once the
+    wall-clock deadline passes — not spin forever."""
+    import itertools
+
+    from PIL import Image as PILImage
+
+    from shortform.visuals import veo_backend
+
+    ref_image = tmp_path / "ref.png"
+    PILImage.new("RGB", (64, 64), (0, 0, 0)).save(ref_image)
+
+    stuck_op = MagicMock()
+    stuck_op.done = False  # never completes
+    mock_client = MagicMock()
+    mock_client.models.generate_videos.return_value = stuck_op
+    mock_client.operations.get.return_value = stuck_op
+
+    # First monotonic() call sets the deadline; every subsequent call is far in
+    # the future so the very first poll-loop check trips the deadline.
+    clock = itertools.chain([0.0], itertools.repeat(1e9))
+
+    with patch("shortform.visuals.veo_backend.genai.Client", return_value=mock_client), \
+         patch("shortform.visuals.veo_backend.time.monotonic", side_effect=lambda: next(clock)), \
+         patch("shortform.visuals.veo_backend.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(RuntimeError, match="deadline"):
+            await veo_backend._generate_video(
+                api_key="test-key",
+                model="veo-3.1-generate-preview",
+                image_path=ref_image,
+                prompt="a cat",
+                output_path=tmp_path / "out.mp4",
+            )

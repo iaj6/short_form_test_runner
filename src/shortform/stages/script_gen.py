@@ -99,26 +99,57 @@ class ScriptGenStage:
 
 
 def _parse_script_response(raw: str, strategy_name: str, topic: str) -> Script:
-    """Parse the JSON response from Claude into a Script."""
+    """Parse the JSON response from Claude into a Script.
+
+    Claude is asked for raw JSON, but it can wrap output in prose or markdown
+    fences, or hit the max_tokens cutoff mid-object. Rather than letting a bare
+    json.loads / dict-index raise an opaque JSONDecodeError or KeyError, every
+    failure mode is turned into a descriptive RuntimeError (the runner contains
+    it to a clean FAILED checkpoint, and the message carries a head of the raw
+    text for debugging).
+    """
     # Strip markdown code fences if present
     text = raw.strip()
     if text.startswith("```"):
         lines = text.split("\n")
         # Remove first and last fence lines
         lines = [line for line in lines if not line.strip().startswith("```")]
-        text = "\n".join(lines)
+        text = "\n".join(lines).strip()
 
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Script response was not valid JSON ({e}). Raw text (head): {raw[:300]!r}"
+        ) from e
 
-    segments = [
-        Segment(
-            index=i,
-            narration=seg["narration"],
-            visual_prompt=seg.get("visual_prompt", ""),
-            text_overlay=seg.get("text_overlay", ""),
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Script response JSON was not an object (got {type(data).__name__}). "
+            f"Raw text (head): {raw[:300]!r}"
         )
-        for i, seg in enumerate(data["segments"])
-    ]
+
+    raw_segments = data.get("segments")
+    if not isinstance(raw_segments, list) or not raw_segments:
+        raise RuntimeError(
+            "Script response JSON is missing a non-empty 'segments' list. "
+            f"Raw text (head): {raw[:300]!r}"
+        )
+
+    segments: list[Segment] = []
+    for i, seg in enumerate(raw_segments):
+        if not isinstance(seg, dict) or not seg.get("narration"):
+            raise RuntimeError(
+                f"Script segment {i} is missing required 'narration'. Segment was: {seg!r}"
+            )
+        segments.append(
+            Segment(
+                index=i,
+                narration=seg["narration"],
+                visual_prompt=seg.get("visual_prompt", ""),
+                text_overlay=seg.get("text_overlay", ""),
+            )
+        )
 
     return Script(
         strategy_name=strategy_name,

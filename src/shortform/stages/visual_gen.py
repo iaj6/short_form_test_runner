@@ -166,7 +166,7 @@ class VisualGenStage:
                     # and still-image paths through the rest of the pipeline.
                     if extra_result.output_type != VisualOutputType.VIDEO:
                         logger.warning(
-                            "Segment %d clip %d chained gen produced %s (likely Veo safety filter); "
+                            "Segment %d clip %d chained gen produced %s (safety filter?); "
                             "retrying with hero-ref anchor",
                             seg.index, extra_idx, extra_result.output_type.value,
                         )

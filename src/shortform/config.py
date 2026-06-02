@@ -105,7 +105,7 @@ class StrategyConfig(BaseModel):
     prompts: dict[str, str] = {}
     topics: list[str] = []
     visuals: dict[str, Any] = {}
-    tts: dict[str, Any] = {}  # backend selection + backend-specific params (ref_audio, ref_text, ...)
+    tts: dict[str, Any] = {}  # backend selection + params (ref_audio, ref_text, ...)
     music: dict[str, Any] = {}  # track, volume overrides
 
 
