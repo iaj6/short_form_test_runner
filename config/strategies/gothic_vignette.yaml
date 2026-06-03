@@ -121,6 +121,9 @@ music:
   duck_ratio: 9.0
 
 visuals:
+  backend: veo  # flagship uses Veo image-to-video; without this the CLI default
+                # (pillow) silently renders black-gradient stills instead.
+
   # Per-segment hero variants. VariantSelectionStage picks one variant per
   # segment based on the segment's narration + visual_prompt; VisualGenStage
   # resolves the key to the matching PNG and feeds it to Veo as the base
