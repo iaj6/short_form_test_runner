@@ -293,17 +293,25 @@ def _group_words_into_phrases(
     """
     phrases: list[tuple[str, float, float]] = []
     i = 0
+    prev_end = 0.0
     while i < len(word_timings):
         chunk = word_timings[i : i + max_words]
         text = " ".join(w.word for w in chunk)
-        start = chunk[0].start
+        # Never start before the previous phrase ended — keeps windows monotonic
+        # and non-overlapping even if the (Whisper-recovered) word timings are
+        # slightly out of order, which would otherwise stack 2-3 captions on one
+        # frame.
+        start = max(chunk[0].start, prev_end)
         # End time: start of next phrase, or end of last word in chunk
         if i + max_words < len(word_timings):
             end = word_timings[i + max_words].start
         else:
             last = chunk[-1]
             end = last.start + last.duration
+        # Guard against degenerate (zero/negative) windows so every phrase shows.
+        end = max(end, start + 0.05)
         phrases.append((text, start, end))
+        prev_end = end
         i += max_words
     return phrases
 
@@ -407,7 +415,10 @@ def _burn_animated_subtitles(
     for idx, (_text, start, end) in enumerate(phrases):
         in_label = "[0:v]" if idx == 0 else f"[tmp{idx}]"
         out_label = "[vout]" if idx == n - 1 else f"[tmp{idx + 1}]"
-        enable = f"between(t\\,{start:.3f}\\,{end:.3f})"
+        # Half-open window [start, end): `between` is inclusive on both ends, so
+        # two adjacent phrases both matched at the shared boundary frame, briefly
+        # double-printing the caption. gte*lt makes the seam exclusive.
+        enable = f"gte(t\\,{start:.3f})*lt(t\\,{end:.3f})"
         filter_parts.append(
             f"{in_label}[{idx + 1}:v]overlay=0:0:enable='{enable}'{out_label}"
         )

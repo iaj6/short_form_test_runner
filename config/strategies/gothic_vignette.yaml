@@ -17,7 +17,8 @@ tts:
   ref_audio: "data/voices/bartholomew_reference_trimmed.wav"
   ref_text: "Good evening. Tonight, I shall speak slowly, with grave deliberation, of matters both ordinary and absurd."
   model: "F5TTS_v1_Base"
-  speed: 0.95         # slightly slower for theatrical pacing
+  speed: 1.05         # F5 runs ~0.55s/word; nudged up from 0.95 to tighten runtime
+                      # while keeping the deadpan. Push to 1.1 for faster still.
   cfg_strength: 2.0
 
 prompts:
@@ -39,7 +40,7 @@ prompts:
     - End on a flat observation, never a moral or punchline-as-such
     - Bartholomew is named, never pronoun-only on first reference
     - Avoid contemporary slang. The narrator is timeless; only Bartholomew's surroundings are modern
-    - Keep each segment tight — around 16-22 words. The full piece should land at ~20-22 seconds spoken at theatrical pacing. Cut any sentence that doesn't earn its place; short-form rewards economy.
+    - Keep each segment very tight — around 11-15 words (F5-TTS speaks slowly, ~0.55s/word, so word count drives runtime hard). The full piece should land at ~18-22 seconds spoken. Cut ruthlessly; short-form rewards economy. One image per segment, not three.
 
     ANTI-PATTERNS (do not do these)
     - No quippy one-liners or sitcom rhythms
@@ -74,10 +75,10 @@ prompts:
 
     The piece is a single continuous narration, broken into exactly {segments} visual segments (visual cuts within one flowing monologue — the narration should read as one piece end-to-end, not three separate beats).
 
-    Segment shape (keep it tight — this is short-form; favor economy over completeness):
-    1. SETUP (4-6 seconds, ~14-18 words) — Bartholomew encountering the situation. One small specific action. Establish the indignity fast.
-    2. DEVELOPMENT (6-9 seconds, ~18-24 words) — The middle. A single consideration or second action, a turn inward. One beat, not three.
-    3. CLOSER (4-6 seconds, ~12-16 words) — A flat observation that lands the vignette. Never a moral, never an explanation. Resignation, drift, or quiet absurdity.
+    Segment shape (keep it very tight — this is short-form; favor economy over completeness. F5-TTS is slow, so honor the word counts):
+    1. SETUP (~5 seconds, ~10-13 words) — Bartholomew encountering the situation. One small specific action. Establish the indignity fast.
+    2. DEVELOPMENT (~7 seconds, ~14-18 words) — The middle. A single consideration or second action, a turn inward. One beat, not three.
+    3. CLOSER (~5 seconds, ~9-12 words) — A flat observation that lands the vignette. Never a moral, never an explanation. Resignation, drift, or quiet absurdity.
 
     For each segment provide:
     - narration: the spoken portion of THIS segment (continues directly from the previous segment's narration — read end-to-end it's one piece)

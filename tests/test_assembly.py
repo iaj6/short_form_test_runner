@@ -61,6 +61,24 @@ def test_group_words_empty_input():
     assert _group_words_into_phrases([], max_words=3) == []
 
 
+def test_group_words_windows_never_overlap():
+    """Phrase windows must be monotonic and non-overlapping so captions never
+    double-print — even when the input timings are slightly out of order
+    (Whisper-recovered timings occasionally are)."""
+    words = [
+        WordTiming(word="a", start=0.0, duration=1.0),
+        WordTiming(word="b", start=0.9, duration=1.0),  # starts before 'a' ends
+        WordTiming(word="c", start=1.5, duration=1.0),
+        WordTiming(word="d", start=1.4, duration=1.0),  # out of order again
+        WordTiming(word="e", start=3.0, duration=1.0),
+    ]
+    phrases = _group_words_into_phrases(words, max_words=2)
+    for (_t1, _s1, e1), (_t2, s2, _e2) in zip(phrases, phrases[1:]):
+        assert s2 >= e1, f"phrase window overlap: prev_end={e1} next_start={s2}"
+    # Every phrase has a positive-length window.
+    assert all(end > start for _t, start, end in phrases)
+
+
 # --- _wrap_text_to_width -------------------------------------------------------
 
 
