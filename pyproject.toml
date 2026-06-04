@@ -17,6 +17,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+captions = [
+    # Word-timing alignment for TTS backends without native timings (F5-TTS),
+    # enabling animated karaoke captions. CTranslate2-based — no torch.
+    "faster-whisper>=1.0.0",
+]
 dev = [
     "ruff>=0.9.0",
     "mypy>=1.14.0",
@@ -49,6 +54,12 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+# faster-whisper is an optional ("captions" extra) soft dependency with no type
+# stubs; don't fail strict typing whether or not it's installed.
+[[tool.mypy.overrides]]
+module = ["faster_whisper", "faster_whisper.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

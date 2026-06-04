@@ -6,6 +6,7 @@ import logging
 import random
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -62,6 +63,11 @@ class AssemblyStage:
         file_store = FileStore()
         vid_cfg = ctx.settings.video
         vis_cfg = ctx.settings.visuals
+        # Overlay strategy visual overrides on the typed defaults so assembly
+        # (subtitle color/size, crossfade, grade) honors the strategy — not just
+        # the visual backend. Previously these were read straight off the typed
+        # settings, so a strategy's font_color/crossfade silently didn't apply.
+        vis: dict[str, Any] = {**vis_cfg.model_dump(), **ctx.strategy.visuals}
         segments = ctx.script.segments
 
         work_dir = file_store.video_dir(ctx.video.id)
@@ -90,7 +96,7 @@ class AssemblyStage:
                     _concat_video_clips_with_xfade(
                         clips=[Path(p) for p in sub_clip_paths],
                         output_path=concat_path,
-                        crossfade_duration=vis_cfg.crossfade_duration,
+                        crossfade_duration=vis["crossfade_duration"],
                         fps=vid_cfg.fps,
                         width=vid_cfg.width,
                         height=vid_cfg.height,
@@ -118,7 +124,7 @@ class AssemblyStage:
                     audio_path=Path(seg.audio_path),
                     output_path=clip_path,
                     duration=seg.actual_duration,
-                    zoom=vis_cfg.ken_burns_zoom,
+                    zoom=vis["ken_burns_zoom"],
                     width=vid_cfg.width,
                     height=vid_cfg.height,
                     fps=vid_cfg.fps,
@@ -138,8 +144,8 @@ class AssemblyStage:
                     width=vid_cfg.width,
                     height=vid_cfg.height,
                     fps=vid_cfg.fps,
-                    font_size=vis_cfg.font_size,
-                    font_color=vis_cfg.font_color,
+                    font_size=vis["font_size"],
+                    font_color=vis["font_color"],
                     video_bitrate=vid_cfg.video_bitrate,
                     pixel_format=vid_cfg.pixel_format,
                     preset=vid_cfg.preset,
@@ -164,7 +170,7 @@ class AssemblyStage:
             _concat_with_crossfade(
                 clips=segment_clips,
                 output_path=assembled_path,
-                crossfade_duration=vis_cfg.crossfade_duration,
+                crossfade_duration=vis["crossfade_duration"],
                 width=vid_cfg.width,
                 height=vid_cfg.height,
                 fps=vid_cfg.fps,
@@ -203,6 +209,34 @@ class AssemblyStage:
                 logger.warning("No music tracks found in category '%s'", music_category)
                 if assembled_path != output_path:
                     assembled_path.rename(output_path)
+
+        # Step 4: Final master — color grade (video) + loudness normalization
+        # (audio). This is the last touch on the file: it unifies Veo's
+        # call-to-call color variance into one graded look and brings audio to
+        # the streaming loudness standard. Skipped entirely when neither is
+        # configured (output stays exactly as assembled).
+        grade_filter = _build_grade_filter(vis.get("grade"))
+        if grade_filter or vid_cfg.loudnorm:
+            premaster_path = work_dir / "premaster.mp4"
+            if premaster_path.exists():
+                premaster_path.unlink()
+            output_path.rename(premaster_path)
+            _apply_master(
+                input_path=premaster_path,
+                output_path=output_path,
+                grade_filter=grade_filter,
+                loudnorm=vid_cfg.loudnorm,
+                loudnorm_lufs=vid_cfg.loudnorm_lufs,
+                video_bitrate=vid_cfg.video_bitrate,
+                pixel_format=vid_cfg.pixel_format,
+                preset=vid_cfg.preset,
+                audio_bitrate=vid_cfg.audio_bitrate,
+                audio_sample_rate=vid_cfg.audio_sample_rate,
+            )
+            logger.info(
+                "Master pass: grade=%s loudnorm=%s",
+                bool(grade_filter), vid_cfg.loudnorm,
+            )
 
         ctx.video.output_path = str(output_path)
         ctx.video.file_size_bytes = file_store.get_video_size(output_path)
@@ -259,17 +293,25 @@ def _group_words_into_phrases(
     """
     phrases: list[tuple[str, float, float]] = []
     i = 0
+    prev_end = 0.0
     while i < len(word_timings):
         chunk = word_timings[i : i + max_words]
         text = " ".join(w.word for w in chunk)
-        start = chunk[0].start
+        # Never start before the previous phrase ended — keeps windows monotonic
+        # and non-overlapping even if the (Whisper-recovered) word timings are
+        # slightly out of order, which would otherwise stack 2-3 captions on one
+        # frame.
+        start = max(chunk[0].start, prev_end)
         # End time: start of next phrase, or end of last word in chunk
         if i + max_words < len(word_timings):
             end = word_timings[i + max_words].start
         else:
             last = chunk[-1]
             end = last.start + last.duration
+        # Guard against degenerate (zero/negative) windows so every phrase shows.
+        end = max(end, start + 0.05)
         phrases.append((text, start, end))
+        prev_end = end
         i += max_words
     return phrases
 
@@ -373,7 +415,10 @@ def _burn_animated_subtitles(
     for idx, (_text, start, end) in enumerate(phrases):
         in_label = "[0:v]" if idx == 0 else f"[tmp{idx}]"
         out_label = "[vout]" if idx == n - 1 else f"[tmp{idx + 1}]"
-        enable = f"between(t\\,{start:.3f}\\,{end:.3f})"
+        # Half-open window [start, end): `between` is inclusive on both ends, so
+        # two adjacent phrases both matched at the shared boundary frame, briefly
+        # double-printing the caption. gte*lt makes the seam exclusive.
+        enable = f"gte(t\\,{start:.3f})*lt(t\\,{end:.3f})"
         filter_parts.append(
             f"{in_label}[{idx + 1}:v]overlay=0:0:enable='{enable}'{out_label}"
         )
@@ -694,6 +739,91 @@ def _concat_video_clips_with_xfade(
             str(output_path),
         ]
     )
+
+
+def _build_grade_filter(grade: dict[str, Any] | None) -> str:
+    """Build an ffmpeg video filter string for a configurable color grade.
+
+    Returns "" when grade is falsy so the caller can skip the video re-encode.
+    Knobs (all optional):
+      contrast / brightness / saturation / gamma → eq filter
+      shadow_cool   → push shadows toward blue (and slightly off-red)
+      highlight_warm→ push highlights toward warm candlelight
+      vignette      → soft lens vignette for cinematic falloff
+    """
+    if not grade:
+        return ""
+    parts: list[str] = []
+
+    eq: list[str] = []
+    for key in ("contrast", "brightness", "saturation", "gamma"):
+        if key in grade and grade[key] is not None:
+            eq.append(f"{key}={grade[key]}")
+    if eq:
+        parts.append("eq=" + ":".join(eq))
+
+    sc = grade.get("shadow_cool")
+    hw = grade.get("highlight_warm")
+    cb: list[str] = []
+    if sc:
+        cb.append(f"bs={sc}")
+        cb.append(f"rs={-sc / 2:.4f}")
+    if hw:
+        cb.append(f"rh={hw}")
+        cb.append(f"bh={-hw / 2:.4f}")
+    if cb:
+        parts.append("colorbalance=" + ":".join(cb))
+
+    if grade.get("vignette"):
+        parts.append("vignette=PI/5")
+
+    return ",".join(parts)
+
+
+def _apply_master(
+    input_path: Path,
+    output_path: Path,
+    grade_filter: str,
+    loudnorm: bool,
+    loudnorm_lufs: float,
+    video_bitrate: str,
+    pixel_format: str,
+    preset: str,
+    audio_bitrate: str,
+    audio_sample_rate: int,
+) -> None:
+    """Final master pass: optional color grade + optional loudness normalization.
+
+    Re-encodes video only when a grade is supplied (else stream-copies it), and
+    re-encodes audio only when loudnorm is on (else stream-copies). EBU R128
+    single-pass loudnorm to the integrated target with -1.5 dBTP ceiling.
+    """
+    args = ["-i", str(input_path)]
+
+    if grade_filter:
+        args += [
+            "-vf", grade_filter,
+            "-c:v", "libx264",
+            "-profile:v", "high",
+            "-b:v", video_bitrate,
+            "-pix_fmt", pixel_format,
+            "-preset", preset,
+        ]
+    else:
+        args += ["-c:v", "copy"]
+
+    if loudnorm:
+        args += [
+            "-af", f"loudnorm=I={loudnorm_lufs}:TP=-1.5:LRA=11",
+            "-c:a", "aac",
+            "-b:a", audio_bitrate,
+            "-ar", str(audio_sample_rate),
+        ]
+    else:
+        args += ["-c:a", "copy"]
+
+    args += ["-movflags", "+faststart", str(output_path)]
+    _run_ffmpeg(args)
 
 
 def _remux_with_faststart(input_path: Path, output_path: Path) -> None:

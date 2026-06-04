@@ -79,6 +79,7 @@ class VisualGenStage:
             # Per-segment config: same as global config, but override
             # reference_image based on the segment's selected hero variant.
             seg_config = dict(config)
+            _apply_camera_move(seg_config, seg.index)
             resolved_ref = variant_resolver(seg.hero_variant)
             if resolved_ref:
                 seg_config["reference_image"] = resolved_ref
@@ -214,6 +215,23 @@ class VisualGenStage:
             total_clips, len(ctx.script.segments), self._backend.name,
         )
         return ctx
+
+
+def _apply_camera_move(seg_config: dict[str, Any], segment_index: int) -> None:
+    """Prepend a per-segment camera move onto the base animation_style.
+
+    Cycles through the strategy's `camera_moves` list so every clip isn't an
+    identical push-in. The base `animation_style` carries the look/medium; the
+    move is prepended. No-op when the strategy declares no camera_moves. All
+    chained sub-clips of a segment reuse the same seg_config, so the move is
+    consistent within a segment and only varies between segments.
+    """
+    moves = seg_config.get("camera_moves") or []
+    if not moves:
+        return
+    move = moves[segment_index % len(moves)]
+    base_style = seg_config.get("animation_style", "")
+    seg_config["animation_style"] = f"{move}, {base_style}" if base_style else move
 
 
 def _build_variant_resolver(strategy_visuals: dict[str, Any]):

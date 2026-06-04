@@ -22,6 +22,8 @@ from shortform.pipeline.context import PipelineContext
 from shortform.stages import assembly
 from shortform.stages.assembly import (
     AssemblyStage,
+    _apply_master,
+    _build_grade_filter,
     _group_words_into_phrases,
     _mix_background_music,
     _mux_video_with_audio,
@@ -57,6 +59,24 @@ def test_group_words_last_phrase_end_uses_last_word_duration():
 
 def test_group_words_empty_input():
     assert _group_words_into_phrases([], max_words=3) == []
+
+
+def test_group_words_windows_never_overlap():
+    """Phrase windows must be monotonic and non-overlapping so captions never
+    double-print — even when the input timings are slightly out of order
+    (Whisper-recovered timings occasionally are)."""
+    words = [
+        WordTiming(word="a", start=0.0, duration=1.0),
+        WordTiming(word="b", start=0.9, duration=1.0),  # starts before 'a' ends
+        WordTiming(word="c", start=1.5, duration=1.0),
+        WordTiming(word="d", start=1.4, duration=1.0),  # out of order again
+        WordTiming(word="e", start=3.0, duration=1.0),
+    ]
+    phrases = _group_words_into_phrases(words, max_words=2)
+    for (_t1, _s1, e1), (_t2, s2, _e2) in zip(phrases, phrases[1:]):
+        assert s2 >= e1, f"phrase window overlap: prev_end={e1} next_start={s2}"
+    # Every phrase has a positive-length window.
+    assert all(end > start for _t, start, end in phrases)
 
 
 # --- _wrap_text_to_width -------------------------------------------------------
@@ -282,3 +302,74 @@ def test_validate_passes_when_all_sub_clips_present(tmp_path: Path):
     errors = AssemblyStage().validate(ctx)
     # No sub-clip error (ffmpeg-availability error may still appear in CI).
     assert not any("sub-clip" in e for e in errors)
+
+
+# --- color grade + master pass (#2) -------------------------------------------
+
+
+def test_build_grade_filter_none_is_empty():
+    assert _build_grade_filter(None) == ""
+    assert _build_grade_filter({}) == ""
+
+
+def test_build_grade_filter_gothic_look():
+    grade = {
+        "contrast": 1.08,
+        "saturation": 0.80,
+        "gamma": 0.94,
+        "shadow_cool": 0.06,
+        "highlight_warm": 0.05,
+        "vignette": True,
+    }
+    f = _build_grade_filter(grade)
+    assert "eq=contrast=1.08:saturation=0.8:gamma=0.94" in f
+    # shadow_cool pushes shadows blue (bs+) and off-red (rs-); highlight_warm warms highlights.
+    assert "colorbalance=bs=0.06:rs=-0.0300:rh=0.05:bh=-0.0250" in f
+    assert "vignette=PI/5" in f
+
+
+def test_apply_master_grade_and_loudnorm(tmp_path: Path):
+    captured: dict[str, list[str]] = {}
+    with patch.object(assembly, "_run_ffmpeg", side_effect=lambda a: captured.update(args=a)):
+        _apply_master(
+            input_path=tmp_path / "pre.mp4",
+            output_path=tmp_path / "out.mp4",
+            grade_filter="eq=contrast=1.1,vignette=PI/5",
+            loudnorm=True,
+            loudnorm_lufs=-14.0,
+            video_bitrate="8M",
+            pixel_format="yuv420p",
+            preset="medium",
+            audio_bitrate="192k",
+            audio_sample_rate=44100,
+        )
+    args = captured["args"]
+    # Grade present → video re-encoded with the filter, not copied.
+    assert "-vf" in args
+    assert args[args.index("-vf") + 1] == "eq=contrast=1.1,vignette=PI/5"
+    assert "libx264" in args
+    # Loudnorm present → audio filtered to the target LUFS.
+    assert "-af" in args
+    assert "loudnorm=I=-14.0:TP=-1.5:LRA=11" in args[args.index("-af") + 1]
+
+
+def test_apply_master_no_grade_copies_video(tmp_path: Path):
+    captured: dict[str, list[str]] = {}
+    with patch.object(assembly, "_run_ffmpeg", side_effect=lambda a: captured.update(args=a)):
+        _apply_master(
+            input_path=tmp_path / "pre.mp4",
+            output_path=tmp_path / "out.mp4",
+            grade_filter="",
+            loudnorm=False,
+            loudnorm_lufs=-14.0,
+            video_bitrate="8M",
+            pixel_format="yuv420p",
+            preset="medium",
+            audio_bitrate="192k",
+            audio_sample_rate=44100,
+        )
+    args = captured["args"]
+    assert "-vf" not in args
+    assert "-af" not in args
+    # Both streams copied when nothing to do.
+    assert args.count("copy") == 2

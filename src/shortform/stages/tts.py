@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from shortform.models.video import VideoStatus
@@ -44,6 +45,20 @@ class TTSStage:
             seg.audio_path = str(result.audio_path)
             seg.actual_duration = result.duration
             seg.word_timings = result.word_timings
+            # Backends that don't emit word timings (F5-TTS) get them recovered
+            # via Whisper so the animated-caption path lights up — but only when
+            # the strategy opts into subtitles. Soft-deps on faster-whisper;
+            # degrades to no captions if it isn't installed.
+            if not seg.word_timings and _want_captions(ctx):
+                from shortform.tts.whisper_align import DEFAULT_MODEL, align_words
+
+                model_size = ctx.strategy.visuals.get("caption_model", DEFAULT_MODEL)
+                seg.word_timings = align_words(Path(seg.audio_path), model_size=model_size)
+                if seg.word_timings:
+                    logger.info(
+                        "Recovered %d caption words for segment %d via Whisper",
+                        len(seg.word_timings), seg.index,
+                    )
             total_duration += result.duration
 
             logger.info(
@@ -80,6 +95,12 @@ def _resolve_backend_config(ctx: PipelineContext) -> tuple[str, dict[str, Any]]:
 
     backend_name = ctx.strategy.tts.get("backend") or getattr(settings_tts, "backend", "edge")
     return backend_name, config
+
+
+def _want_captions(ctx: PipelineContext) -> bool:
+    """Whether to recover word timings for animated captions when the backend
+    didn't provide them. Strategy opt-in via visuals.subtitles (default True)."""
+    return bool(ctx.strategy.visuals.get("subtitles", True))
 
 
 def _backend_init_kwargs(backend_name: str, ctx: PipelineContext) -> dict[str, Any]:

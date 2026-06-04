@@ -40,6 +40,8 @@ class VideoConfig(BaseModel):
     preset: str = "medium"
     min_duration: int = 15
     max_duration: int = 60
+    loudnorm: bool = True  # EBU R128 loudness normalization on the final master
+    loudnorm_lufs: float = -14.0  # integrated target (streaming standard)
 
 
 class VisualsConfig(BaseModel):

@@ -77,8 +77,10 @@ def generate(
     db = Database(paths["db_path"])
     db.initialize()
 
-    # Resolve visual backend
-    backend_name = visual_backend or settings.visuals.backend
+    # Resolve visual backend: CLI flag > strategy declaration > global default.
+    # Letting the strategy declare its backend stops the flagship (gothic) from
+    # silently falling back to Pillow gradients when no flag is passed.
+    backend_name = visual_backend or strat.visuals.get("backend") or settings.visuals.backend
     try:
         backend_kwargs: dict[str, str] = {}
         if backend_name == "veo":
@@ -242,7 +244,7 @@ def generate_from_script(
     db = Database(paths["db_path"])
     db.initialize()
 
-    backend_name = visual_backend or settings.visuals.backend
+    backend_name = visual_backend or strat.visuals.get("backend") or settings.visuals.backend
     try:
         backend_kwargs: dict[str, str] = {}
         if backend_name == "veo":
