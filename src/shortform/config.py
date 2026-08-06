@@ -91,6 +91,7 @@ class AppSettings(BaseSettings):
     anthropic_api_key: str = ""
     xai_api_key: str = ""
     google_gemini_api_key: str = ""
+    elevenlabs_api_key: str = ""
     llm: LLMConfig = LLMConfig()
     tts: TTSConfig = TTSConfig()
     video: VideoConfig = VideoConfig()

@@ -163,19 +163,7 @@ class Database:
     # --- Scripts ---
 
     def save_script(self, script: Script, video_id: str) -> None:
-        segments_data = [
-            {
-                "index": s.index,
-                "narration": s.narration,
-                "visual_prompt": s.visual_prompt,
-                "text_overlay": s.text_overlay,
-                "estimated_duration": s.estimated_duration,
-                "actual_duration": s.actual_duration,
-                "audio_path": s.audio_path,
-                "image_path": s.image_path,
-            }
-            for s in script.segments
-        ]
+        segments_data = [s.to_dict(include_runtime=True) for s in script.segments]
         self.conn.execute(
             """INSERT OR REPLACE INTO scripts
             (id, video_id, strategy_name, topic, title, segments_json,
@@ -200,7 +188,9 @@ class Database:
         if not row:
             return None
         segments_data = json.loads(row["segments_json"] or "[]")
-        segments = [Segment(**s) for s in segments_data]
+        # from_dict, not Segment(**s): dialogue segments carry nested turns that
+        # a bare splat would leave as raw dicts.
+        segments = [Segment.from_dict(s) for s in segments_data]
         return Script(
             id=row["id"],
             strategy_name=row["strategy_name"] or "",

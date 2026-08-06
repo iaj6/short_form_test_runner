@@ -6,10 +6,12 @@ from typing import Any
 
 from shortform.tts.backend import TTSBackend
 from shortform.tts.edge_backend import EdgeBackend
+from shortform.tts.elevenlabs_backend import ElevenLabsBackend
 from shortform.tts.f5_backend import F5TTSBackend
 
 _BACKENDS: dict[str, type] = {
     "edge": EdgeBackend,
+    "elevenlabs": ElevenLabsBackend,
     "f5_tts": F5TTSBackend,
 }
 
