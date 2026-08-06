@@ -18,10 +18,13 @@ from typing import Any
 import yaml
 
 from shortform.config import PROJECT_ROOT
+from shortform.models.script import Segment
 from shortform.models.video import VideoStatus
 from shortform.pipeline.context import PipelineContext
 from shortform.store.file_store import FileStore
-from shortform.visuals.backend import VisualBackend, VisualOutputType
+from shortform.tts.cast import normalize_speaker
+from shortform.visuals.backend import VisualBackend, VisualOutput, VisualOutputType
+from shortform.visuals.critic import ClipCritic
 from shortform.visuals.pillow_backend import PillowBackend
 
 logger = logging.getLogger(__name__)
@@ -31,10 +34,29 @@ logger = logging.getLogger(__name__)
 # crossfade in assembly, so each clip "contributes" ~7.5s of timeline.
 CLIP_TARGET_SECONDS = 7.5
 
+# Generation attempts per clip when the critic rejects it. Attempt 3 drops the
+# chain anchor and re-anchors to the hero reference — see _generate_reviewed.
+CRITIC_MAX_ATTEMPTS = 3
+
 
 class VisualGenStage:
-    def __init__(self, backend: VisualBackend | None = None) -> None:
+    def __init__(
+        self,
+        backend: VisualBackend | None = None,
+        reuse_existing: bool = True,
+        critic: ClipCritic | None = None,
+    ) -> None:
         self._backend = backend or PillowBackend()
+        # Optional continuity critic. Without one the stage generates blind —
+        # fine when a human reviews every render, wrong for unattended batches.
+        self._critic = critic
+        # Reuse already-generated clips found in the working directory. Veo is by
+        # far the most expensive stage and interrupted runs are routine (depleted
+        # credits, safety-filter bailouts, rate limits) — without this, a run that
+        # dies on the last clip throws away every clip before it. Only has an
+        # effect when the run resumes into an existing video id
+        # (`generate-from-script --video-id`), since a fresh id gets a fresh dir.
+        self._reuse_existing = reuse_existing
 
     @property
     def name(self) -> str:
@@ -45,6 +67,138 @@ class VisualGenStage:
         if not ctx.script.segments:
             errors.append("No script segments for visual generation")
         return errors
+
+    def _cached(self, output_stem: Path, width: int, height: int) -> VisualOutput | None:
+        """An already-generated asset for this output stem, or None to generate.
+
+        Backends write `<stem>.mp4` (Veo) or `<stem>.png` (Pillow, and Veo's
+        safety-filter fallback), so both are candidates.
+
+        A video is only accepted if ffprobe can read a duration from it. A run
+        killed mid-download leaves a plausible-looking but truncated MP4, and
+        silently reusing that would produce a broken episode far downstream —
+        much more expensive to diagnose than the regeneration it saves.
+        """
+        if not self._reuse_existing:
+            return None
+
+        for suffix, out_type in (
+            (".mp4", VisualOutputType.VIDEO),
+            (".png", VisualOutputType.IMAGE),
+        ):
+            path = output_stem.with_suffix(suffix)
+            if not path.exists() or path.stat().st_size == 0:
+                continue
+            if out_type == VisualOutputType.VIDEO and _probe_duration(path) <= 0:
+                logger.warning(
+                    "Existing clip %s is unreadable (truncated?) — regenerating",
+                    path.name,
+                )
+                continue
+            return VisualOutput(
+                path=path, output_type=out_type, width=width, height=height
+            )
+        return None
+
+    async def _generate_reviewed(
+        self,
+        segment: Segment,
+        output_path: Path,
+        width: int,
+        height: int,
+        config: dict[str, Any],
+        label: str,
+        reference_path: str,
+        work_dir: Path,
+        expected_characters: str,
+        reviews: list[dict[str, Any]],
+    ) -> VisualOutput:
+        """Generate one clip, review it, and retry on a fatal continuity failure.
+
+        Reviewing INLINE rather than in a pass at the end is the whole point: a
+        bad clip becomes the chain anchor for the next one, so a corrupted clip 1
+        silently poisons clips 2 and 3. Catching it here means the rest of the
+        segment never inherits it.
+
+        Escalation, mirroring the safety-filter ladder already in this stage:
+          1. Generate as configured.
+          2. On a fatal verdict, regenerate unchanged — the failures are
+             statistical, and the same inputs often succeed on a second roll.
+          3. Still fatal: drop `chain_from` and re-anchor to the hero reference.
+             When the previous clip's last frame is what went wrong, chaining
+             from it again just reproduces the fault.
+        Exhausted: keep the last attempt and record it. A flagged clip in a
+        finished episode beats a failed render, but it must be reported.
+        """
+        attempts: list[VisualOutput] = []
+        verdict = None
+
+        for attempt in range(1, CRITIC_MAX_ATTEMPTS + 1):
+            attempt_config = dict(config)
+            escalated = attempt >= 3 and config.get("chain_from")
+            if escalated:
+                # Re-anchor to the hero instead of the (suspect) chained frame.
+                attempt_config.pop("chain_from", None)
+
+            result = await self._backend.generate(
+                segment=segment,
+                output_path=output_path,
+                width=width,
+                height=height,
+                config=attempt_config,
+            )
+            attempts.append(result)
+
+            if result.output_type != VisualOutputType.VIDEO:
+                # A still means the backend already fell back (safety filter);
+                # its own retry ladder handled that. Nothing for the critic to do.
+                return result
+            if self._critic is None or not self._critic.available:
+                return result
+
+            verdict = self._critic.review(
+                clip_path=result.path,
+                reference_path=Path(reference_path),
+                work_dir=work_dir,
+                expected_characters=expected_characters,
+            )
+            reviews.append(
+                {
+                    "clip": result.path.name,
+                    "attempt": attempt,
+                    "passed": verdict.passed,
+                    "unverified": verdict.unverified,
+                    "detail": verdict.describe(),
+                }
+            )
+
+            if verdict.passed:
+                if verdict.unverified:
+                    logger.warning("%s: NOT VERIFIED — %s", label, verdict.summary)
+                else:
+                    logger.info("%s: critic ok — %s", label, verdict.summary)
+                return result
+
+            logger.warning(
+                "%s: critic REJECTED (attempt %d/%d) — %s",
+                label, attempt, CRITIC_MAX_ATTEMPTS, verdict.describe(),
+            )
+            if attempt < CRITIC_MAX_ATTEMPTS:
+                logger.info(
+                    "%s: regenerating%s",
+                    label,
+                    " without chain anchor (re-anchoring to hero)"
+                    if attempt + 1 >= 3 and config.get("chain_from")
+                    else "",
+                )
+
+        logger.error(
+            "%s: still failing continuity after %d attempts — keeping last clip. "
+            "FLAGGED FOR REVIEW: %s",
+            label, CRITIC_MAX_ATTEMPTS,
+            verdict.describe() if verdict else "unknown",
+        )
+        return attempts[-1]
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
         file_store = FileStore()
@@ -66,12 +220,18 @@ class VisualGenStage:
         # by VariantSelectionStage. Strategies without it use the existing
         # `reference_image` field unchanged.
         variant_resolver = _build_variant_resolver(ctx.strategy.visuals)
+        speaker_descriptions = _speaker_descriptions(ctx.strategy.visuals)
 
         has_video_clips = False
         # Per-segment clip lists for assembly. Only populated when a video-output
         # segment needed >1 clip; assembly falls back to seg.image_path otherwise.
         segment_clips: dict[int, list[str]] = ctx.artifacts.setdefault(
             "segment_clips", {}
+        )
+        # Critic findings, surfaced after the run so an unattended batch reports
+        # what it flagged instead of burying it in the log.
+        critic_reviews: list[dict[str, Any]] = ctx.artifacts.setdefault(
+            "critic_reviews", []
         )
 
         for seg in ctx.script.segments:
@@ -80,6 +240,17 @@ class VisualGenStage:
             # reference_image based on the segment's selected hero variant.
             seg_config = dict(config)
             _apply_camera_move(seg_config, seg.index)
+            # Clip 0 covers the first window of the segment's audio; chained
+            # clips get their own window below.
+            seg_config["speech_schedule"] = build_speech_schedule(
+                seg, 0, CLIP_TARGET_SECONDS, speaker_descriptions
+            )
+            # Physical descriptions of who should be on screen, so the critic
+            # knows what it's checking for rather than inferring from the image.
+            expected_characters = ", ".join(
+                speaker_descriptions.get(normalize_speaker(s), s)
+                for s in seg.speakers
+            )
             resolved_ref = variant_resolver(seg.hero_variant)
             if resolved_ref:
                 seg_config["reference_image"] = resolved_ref
@@ -92,17 +263,29 @@ class VisualGenStage:
             # Always generate clip 0 first so we can see the output type before
             # deciding whether to generate more.
             first_output = video_dir / f"segment_{seg.index:02d}"
-            logger.info(
-                "Generating visual for segment %d [%s] (clip 1)",
-                seg.index, self._backend.name,
-            )
-            first_result = await self._backend.generate(
-                segment=seg,
-                output_path=first_output,
-                width=vid_cfg.width,
-                height=vid_cfg.height,
-                config=seg_config,
-            )
+            first_result = self._cached(first_output, vid_cfg.width, vid_cfg.height)
+            if first_result is not None:
+                logger.info(
+                    "Segment %d clip 1: reusing existing %s",
+                    seg.index, first_result.path.name,
+                )
+            else:
+                logger.info(
+                    "Generating visual for segment %d [%s] (clip 1)",
+                    seg.index, self._backend.name,
+                )
+                first_result = await self._generate_reviewed(
+                    segment=seg,
+                    output_path=first_output,
+                    width=vid_cfg.width,
+                    height=vid_cfg.height,
+                    config=seg_config,
+                    label=f"Segment {seg.index} clip 1",
+                    reference_path=seg_config.get("reference_image", ""),
+                    work_dir=video_dir / "critic",
+                    expected_characters=expected_characters,
+                    reviews=critic_reviews,
+                )
             seg.image_path = str(first_result.path)
             segment_types = ctx.artifacts.setdefault("segment_visual_types", {})
             segment_types[seg.index] = first_result.output_type
@@ -140,21 +323,46 @@ class VisualGenStage:
                         else f"segment_{seg.index:02d}_lastframe.png"
                     )
                     _extract_last_frame(prev_clip, last_frame)
-                    chain_config = {**seg_config, "chain_from": str(last_frame)}
+                    chain_config = {
+                        **seg_config,
+                        "chain_from": str(last_frame),
+                        # This clip covers a later slice of the audio, so it
+                        # needs its own dialogue window — reusing clip 0's
+                        # would tell the model the wrong puppet is speaking.
+                        "speech_schedule": build_speech_schedule(
+                            seg, extra_idx, CLIP_TARGET_SECONDS, speaker_descriptions
+                        ),
+                    }
 
                     extra_output = (
                         video_dir / f"segment_{seg.index:02d}_clip_{extra_idx:02d}"
                     )
+                    cached = self._cached(extra_output, vid_cfg.width, vid_cfg.height)
+                    if cached is not None:
+                        logger.info(
+                            "Segment %d clip %d/%d: reusing existing %s",
+                            seg.index, extra_idx + 1, n_clips_total, cached.path.name,
+                        )
+                        clip_paths.append(str(cached.path))
+                        continue
                     logger.info(
                         "Generating visual for segment %d [%s] (clip %d/%d, chained)",
                         seg.index, self._backend.name, extra_idx + 1, n_clips_total,
                     )
-                    extra_result = await self._backend.generate(
+                    extra_result = await self._generate_reviewed(
                         segment=seg,
                         output_path=extra_output,
                         width=vid_cfg.width,
                         height=vid_cfg.height,
                         config=chain_config,
+                        label=f"Segment {seg.index} clip {extra_idx + 1}",
+                        # Judge chained clips against the SEGMENT'S HERO, not the
+                        # frame they chained from — otherwise a drifting clip is
+                        # compared against the drift and passes.
+                        reference_path=seg_config.get("reference_image", ""),
+                        work_dir=video_dir / "critic",
+                        expected_characters=expected_characters,
+                        reviews=critic_reviews,
                     )
 
                     # If the chained generation got rejected (e.g., Veo safety
@@ -214,7 +422,113 @@ class VisualGenStage:
             "Visual generation complete: %d clips across %d segments via %s",
             total_clips, len(ctx.script.segments), self._backend.name,
         )
+        _log_critic_summary(critic_reviews)
         return ctx
+
+
+def _log_critic_summary(reviews: list[dict[str, Any]]) -> None:
+    """Report what the critic found, at the end where it can't be missed.
+
+    The point of an unattended run is that nobody is watching the log scroll by.
+    A clip that failed every attempt, or a run where the critic never actually
+    ran, has to be visible in the last few lines — otherwise "it finished" gets
+    read as "it's fine".
+    """
+    if not reviews:
+        return
+
+    clips = {r["clip"] for r in reviews}
+    unverified = {r["clip"] for r in reviews if r["unverified"]}
+    regenerated = {r["clip"] for r in reviews if not r["passed"]}
+    # A clip is only really failing if its LAST attempt failed; earlier
+    # rejections that a retry fixed are a success story, not a problem.
+    final = {r["clip"]: r for r in reviews}
+    still_failing = [r for r in final.values() if not r["passed"]]
+
+    logger.info(
+        "Critic: reviewed %d clip(s), %d regenerated, %d unverified",
+        len(clips), len(regenerated - unverified), len(unverified),
+    )
+    if unverified:
+        logger.warning(
+            "Critic could NOT verify %d clip(s) — these were not checked: %s",
+            len(unverified), ", ".join(sorted(unverified)),
+        )
+    for r in still_failing:
+        logger.error(
+            "FLAGGED FOR REVIEW — %s failed continuity after %d attempt(s): %s",
+            r["clip"], r["attempt"], r["detail"],
+        )
+
+
+def _probe_duration(path: Path) -> float:
+    """Seconds of media at `path`, or 0.0 if it isn't readable."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=nw=1:nk=1", str(path),
+        ],
+        capture_output=True, text=True,
+    )
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def build_speech_schedule(
+    segment: Segment,
+    clip_index: int,
+    clip_seconds: float,
+    descriptions: dict[str, str],
+) -> str:
+    """Timed 'who speaks when' for the slice of audio one clip covers.
+
+    Image-to-video models never see the audio track, so without this they have
+    no idea anyone is talking and animate every character's mouth at once —
+    which reads as far more broken than imperfect lip-sync does. Telling the
+    model that exactly one puppet speaks in each window, and that the others
+    hold their mouths shut, recovers most of the perceived sync.
+
+    Times are relative to this clip's start and clamped to its length. Speakers
+    are named by physical description (from strategy.visuals.speaker_descriptions)
+    because the model knows nothing about a name like "PERE UBU".
+
+    Returns "" for single-narrator segments — narration has no speaker to show.
+    """
+    if not segment.turn_timings:
+        return ""
+
+    window_start = clip_index * clip_seconds
+    window_end = window_start + clip_seconds
+
+    beats: list[str] = []
+    for timing in segment.turn_timings:
+        turn_end = timing.start + timing.duration
+        if turn_end <= window_start or timing.start >= window_end:
+            continue
+        rel_start = max(0.0, timing.start - window_start)
+        rel_end = min(clip_seconds, turn_end - window_start)
+        who = descriptions.get(normalize_speaker(timing.speaker), timing.speaker)
+        beats.append(f"from {rel_start:.1f}s to {rel_end:.1f}s {who} is speaking")
+
+    if not beats:
+        return ""
+
+    return (
+        "Dialogue timing for this shot: "
+        + "; ".join(beats)
+        + ". Only the character described as speaking moves their mouth. Every "
+        "other puppet keeps its mouth firmly closed and listens, reacting with "
+        "small head turns and body movements only. Never move two mouths at once."
+    )
+
+
+def _speaker_descriptions(strategy_visuals: dict[str, Any]) -> dict[str, str]:
+    """Normalized speaker-key -> physical description map."""
+    raw = strategy_visuals.get("speaker_descriptions") or {}
+    return {normalize_speaker(k): str(v) for k, v in raw.items()}
 
 
 def _apply_camera_move(seg_config: dict[str, Any], segment_index: int) -> None:
