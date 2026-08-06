@@ -61,6 +61,84 @@ The non-obvious architectural piece worth understanding before modifying anythin
 
 **For strategies without variants.** The resolver falls back to the strategy's singular `reference_image` config (legacy single-anchor behavior), so other strategies that don't ship a manifest aren't affected.
 
+## Multi-speaker dialogue (`Segment.turns` + `VoiceCast`)
+
+Built for adapted stage plays, where a segment is an exchange between characters rather than one narrator's monologue. Single-narrator strategies are completely unaffected — they declare no `tts.voices` and take the original code path.
+
+**The data model.** `Segment.turns: list[Turn]`, where `Turn` is `{speaker, line, stage_direction}`. The critical design choice: **`narration` stays authoritative-looking and is *derived* from the turns** in `Segment.__post_init__` (joined `line`s, stage directions excluded — they're performance notes, never spoken). That means every existing `.narration` consumer — caption alignment, variant selection, Veo prompt building, the CLI script preview — keeps working without knowing that speakers exist. An explicitly-supplied `narration` wins over the derived join, so an adaptation can hand-write a cleaner flat text.
+
+`Segment.from_dict` / `to_dict` centralize rehydration because a bare `Segment(**data)` leaves nested turns as raw dicts — which then explodes somewhere much later than the load. Both `Script.load_json` and `db.get_script` go through them. `narration` may be omitted from a dialogue segment's JSON; a segment with *neither* narration nor turns is a hard error rather than a silently silent segment.
+
+**Voice resolution** (`src/shortform/tts/cast.py`). Cloning a reference voice doesn't scale past a handful of characters, so `VoiceCast` supports **mixing backends within one video**: F5-TTS clones for principals, Edge TTS for bit parts and crowds. Each speaker entry inherits the base/default config and overrides selectively, so a clone only names its own `ref_audio`. `backend` inside an entry switches that speaker's backend entirely.
+
+```yaml
+tts:
+  backend: "f5_tts"          # default voice (also the narrator)
+  ref_audio: "data/voices/narrator.wav"
+  ref_text: "..."
+  turn_gap: 0.28
+  stage_direction_gap: 0.55
+  voices:
+    pere_ubu: { ref_audio: "data/voices/ubu.wav", ref_text: "...", speed: 1.05 }
+    bordure:  { backend: "edge", voice: "en-GB-RyanNeural", rate: "+5%" }
+```
+
+Speaker keys are normalized (`normalize_speaker`), so an adaptation can emit `PÈRE UBU` straight from the source text and it resolves to `pere_ubu` — no mapping table. **An uncast speaker is fatal, not a fallback to the default voice**: a typo'd key would otherwise narrate an entire character in the wrong voice and you'd only find out by watching the finished video. `TTSStage.validate` resolves the whole cast up front so that failure lands before any inference time is spent.
+
+**Gap policy.** `turn_gap` between turns; `stage_direction_gap` when the *next* line carries a stage direction (the beat belongs before the annotated delivery, not after it). The final turn gets no trailing silence — assembly controls inter-segment spacing and a trailing pad desyncs the video mux.
+
+**Concatenation** (`src/shortform/tts/concat.py`). Mixed backends mean heterogeneous inputs (F5 emits 24kHz mono, Edge its own MP3 profile), which rules out ffmpeg's concat *demuxer* — it requires identical codec parameters and mangles mismatched ones. Uses the concat *filter* with per-input `aresample`/`aformat` normalization, the same lesson `assembly.py` already encodes for video xfade chains. Output matches `f5_backend._wav_to_mp3`'s profile, so **a multi-voice segment is indistinguishable from a single-voice one downstream** — assembly reads `seg.audio_path` and nothing else, which is why none of its 945 lines needed to change.
+
+**Caption timings** are merged from per-turn timings with each turn's offset applied, but **all-or-nothing**: if any turn's backend emitted none (F5-TTS never does), the merge returns empty and the caller falls back to Whisper over the whole joined file. Partial timings would caption only the Edge-voiced lines and silently drop the cloned ones — worse than no captions, because it looks like it worked.
+
+## Batch runner (`pipeline/batch.py`, `shortform batch`)
+
+Renders many episodes unattended and reports what needs a human.
+
+```
+uv run shortform batch data/scripts/<series>e*.json -vb veo --report run.json
+uv run shortform batch data/scripts/*.json --dry-run     # plan, spend nothing
+```
+
+**Deterministic video ids are the load-bearing piece.** `generate-from-script` mints a random id per run, so assets land in a fresh directory and a re-run regenerates everything. In batch mode **the video id IS the script id**, so assets are addressable (`data/assets/<script_id>/`), outputs sort by episode, and a re-run automatically reuses every clip the previous attempt paid for. Without this, resuming a half-finished batch costs full price twice.
+
+**Skip / resume.** Finished episodes are skipped outright; partial ones resume from their existing clips via the reuse path in `visual_gen`. Verified: a full 3-episode re-run took 1.2s and spent nothing.
+
+**Failure isolation, with one exception.** An episode failing isolates to itself and the batch continues. Depleted Veo credits abort the run — every remaining episode would fail identically, so continuing just burns wall-clock. The credit sniff is shared with `veo_backend`'s retry ladder (`is_credits_error`) so the two can't drift.
+
+**The report leads with what needs a human** — flagged clips and unverified clips, tracked separately because "failed continuity" and "never checked" are different problems. A flagged episode still counts as `ok`: it rendered, someone just has to look at it. `--report` writes JSON for scripting.
+
+**The skip check is backend-aware**, via a `<script_id>.manifest.json` sidecar written next to each finished video recording the backend that produced it. Four cases, and the default in every ambiguous one is to RENDER — a wasted re-render costs money, but a wrong skip produces nothing and isn't noticed until someone goes looking for the file:
+
+| state | action |
+|---|---|
+| manifest + video + backend matches | skip |
+| manifest + video + different backend | render, warning that the previous output is being replaced |
+| video but no manifest (e.g. from `generate-from-script`) | render — backend unknown, so we can't claim it's done |
+| manifest but video deleted, or corrupt manifest | render |
+
+Without this, a cheap `-vb pillow` test run marks every episode finished and a later Veo pass renders nothing at all. The manifest also carries the critic's flagged/unverified clips, so `data/videos/` is self-describing without re-reading the run log.
+
+Sequential on purpose: Veo is rate-limited, and a batch you can Ctrl-C without leaving half-written parallel state is worth more than the wall-clock a concurrent version would save.
+
+## Continuity critic (`visuals/critic.py`)
+
+The pipeline's feedback loop. Without it, `visual_gen` generates and `assembly` muxes without anything ever *looking* at the output — a swapped character surfaces only when a human watches the finished episode, which is exactly what an unattended batch doesn't do.
+
+After each clip is generated, frames are sampled and sent to Claude alongside the hero reference the clip was anchored to, with one question: is this still the same scene with the same characters? Opt-in per strategy via `visuals.critic: true`; `--no-critic` disables for a run.
+
+**Why it runs inline, not as a pass at the end.** A bad clip becomes the chain anchor for the next one. A corrupted clip 1 silently poisons clips 2 and 3, so a post-hoc pass would flag three clips where an inline check prevents two of them from ever being generated wrong.
+
+**Severity, not a boolean.** Identity failures (character replaced/missing/swapped, new character, setting changed) are `fatal` and trigger a regenerate. Generational softening, set-dressing drift, and minor camera movement are `minor` — reported, but not worth paying to regenerate. Verified in practice: a known-good clip was correctly flagged `minor: camera_moved` for a slight push-in and still passed.
+
+**Escalation ladder**, mirroring the existing safety-filter retry: (1) generate; (2) on a fatal verdict regenerate unchanged, since the failures are statistical; (3) still fatal — drop `chain_from` and re-anchor to the hero, because chaining from a poisoned frame just reproduces the fault. Exhausted: keep the last clip and log `FLAGGED FOR REVIEW`. A flagged clip in a finished episode beats a failed render.
+
+**Chained clips are judged against the segment's hero, not the frame they chained from** — otherwise a drifting clip gets compared against the drift and passes.
+
+**It can never block a render.** Missing key, network error, refusal, malformed response — all degrade to a passing verdict marked `unverified`, reported separately at the end so "never checked" can't be mistaken for "checked and fine". A critic that crashes a batch is worse than no critic.
+
+**Bias toward passing.** A false positive costs one extra clip; a false negative costs a broken episode. But a critic that flags everything burns the budget and trains you to ignore it, so the prompt says explicitly: flag clear failures, and when uncertain, pass.
+
 ## Multi-clip + last-frame chaining
 
 Veo is hard-locked at ~8 seconds per clip; F5-TTS typically narrates 14–22 seconds per segment. The gap is bridged in `VisualGenStage`:
@@ -116,7 +194,7 @@ These are real next-step ideas, not commitments. None block current functionalit
 - **Music selector** — `data/music/<category>/tracks.yaml` has mood-tag schema in place; a selector matching tracks to vignette content per video is the cheapest remaining quality win.
 - **Publish automation** — `src/shortform/stages/publish.py` is a stub. YT Data API v3 OAuth flow + resumable upload is ~5–6 hours of work. Deferred until a published channel has data to validate against.
 - **Cost optimization for Veo strategies** — narration tightening from 16–22s/segment toward 12–14s/segment drops ~30% of Veo cost per video. Strategy-prompt-tuning, not code.
-- **Whisper subtitle alignment** — F5-TTS doesn't emit word timings; the existing animated-subtitle path in assembly is dead-code for F5-TTS strategies. Post-hoc Whisper alignment would re-enable it.
+- ~~**Whisper subtitle alignment**~~ — done. `src/shortform/tts/whisper_align.py` recovers word timings for backends that don't emit them (F5-TTS), gated on `visuals.subtitles`. Soft-deps on `faster-whisper` via the `captions` extra; degrades to no captions if absent. It's free transcription rather than forced alignment against the known script, so caption words come from ASR and can occasionally differ from the narration — upgrade to whisperx/stable-ts if that drift ever matters.
 - **Alternate visual backends** — Kling for looser-filter content, or another local-model attempt on heavier hardware. The `src/shortform/visuals/registry.py` pattern makes adding one straightforward.
 
 ## Key decisions already made (don't re-debate without new info)
