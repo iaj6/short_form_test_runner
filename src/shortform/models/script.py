@@ -61,6 +61,10 @@ class Turn:
     # Non-spoken performance note ("aside", "brandishing the phynance hook").
     # Never synthesized — it earns a longer pause before the line it annotates.
     stage_direction: str = ""
+    # Named cue from data/sfx/library.yaml, played in the pause AFTER this line.
+    # Referenced explicitly rather than inferred from the stage direction: most
+    # directions ("aside", "aloud") describe delivery and make no sound at all.
+    sfx: str = ""
 
 
 @dataclass
@@ -141,6 +145,7 @@ class Segment:
                 speaker=t.get("speaker", ""),
                 line=t.get("line", ""),
                 stage_direction=t.get("stage_direction", ""),
+                sfx=t.get("sfx", ""),
             )
             for t in data.get("turns") or []
         ]
@@ -165,6 +170,7 @@ class Segment:
             data["turns"] = [
                 {"speaker": t.speaker, "line": t.line}
                 | ({"stage_direction": t.stage_direction} if t.stage_direction else {})
+                | ({"sfx": t.sfx} if t.sfx else {})
                 for t in self.turns
             ]
         if include_runtime:
@@ -202,6 +208,11 @@ class Script:
     segments: list[Segment] = field(default_factory=list)
     total_duration: float = 0.0
     raw_llm_response: str = ""
+    # Per-episode music mood, overriding the strategy's default. A serial wants
+    # one recognisable score selected *per scene* — a strategy-level mood alone
+    # would pin every episode to the same cue and leave the rest of the library
+    # unused.
+    music_mood: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
 
     @property
@@ -225,6 +236,7 @@ class Script:
             "topic": self.topic,
             "title": self.title,
             "total_duration": self.total_duration,
+            "music_mood": self.music_mood,
             "created_at": self.created_at.isoformat(),
             "segments": [s.to_dict() for s in self.segments],
         }
@@ -266,5 +278,6 @@ class Script:
             title=data.get("title", ""),
             segments=segments,
             total_duration=data.get("total_duration", 0.0),
+            music_mood=[str(m) for m in data.get("music_mood") or []],
             created_at=created_at,
         )

@@ -127,10 +127,12 @@ class Speech:
     speaker: str
     line: str
     stage_direction: str = ""
+    sfx: str = ""
     beat: bool = False
     episode_break: bool = False
     episode_title: str = ""
     scene_number: int = 0
+    mood: list[str] = field(default_factory=list)
     location: str = ""
     staging: str = ""
     ends_scene: bool = False
@@ -177,10 +179,15 @@ def flatten(play: dict[str, Any]) -> list[Speech]:
                     speaker=str(raw["speaker"]).strip(),
                     line=" ".join(str(raw["line"]).split()),
                     stage_direction=str(raw.get("stage_direction", "")).strip(),
+                    sfx=str(raw.get("sfx", "")).strip(),
                     beat=bool(raw.get("beat", False)),
                     episode_break=bool(raw.get("episode_break", False)),
                     episode_title=str(raw.get("episode_title", "")).strip(),
                     scene_number=int(scene.get("number", 0)),
+                    mood=(
+                        [str(m) for m in scene.get("mood") or []]
+                        + [str(m) for m in raw.get("mood") or []]
+                    ),
                     location=str(scene.get("location", "")).strip(),
                     staging=" ".join(str(scene.get("staging", "")).split()),
                     ends_scene=(i == len(speeches) - 1),
@@ -359,11 +366,20 @@ def build_script(
         else f"scenes {scene_span[0]}-{scene_span[-1]}"
     )
 
+    # An episode's mood comes from the scenes it spans. Union rather than
+    # first-wins, so an episode crossing a scene boundary can match either cue.
+    episode_mood: list[str] = []
+    for sp in episode.speeches:
+        for m in sp.mood:
+            if m not in episode_mood:
+                episode_mood.append(m)
+
     return Script(
         id=f"{_slug(play.get('play', 'play'))}{act:02d}e{number:02d}",
         strategy_name=str(play.get("strategy", "")),
         topic=f"Act {act}, {scene_desc}",
         title=title,
+        music_mood=episode_mood,
         segments=[
             Segment(
                 index=i,
@@ -375,6 +391,7 @@ def build_script(
                         speaker=sp.speaker,
                         line=sp.line,
                         stage_direction=sp.stage_direction,
+                        sfx=sp.sfx,
                     )
                     for sp in seg.speeches
                 ],
