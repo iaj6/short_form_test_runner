@@ -1,0 +1,71 @@
+# Sound-effect library — shared across strategies.
+#
+# A door slam is a door slam: effects are generated ONCE and referenced by name
+# from a play source (`sfx: door_slam`), rather than generated per occurrence.
+# Cheaper, and consistent across a long series.
+#
+# Generate any entry that has a `prompt` and no audio file yet:
+#   uv run python scripts/generate_sfx.py
+#   uv run python scripts/generate_sfx.py --only door_slam --force
+#
+# Audio is gitignored; this manifest is the source of truth and the library is
+# reproducible from it.
+#
+# STYLE. These sit under a deliberately artificial toy-theatre production, so
+# they should read as *stage* effects — a little dry, a little overdone, the
+# sound a small company makes in the wings — rather than field recordings.
+#
+# ADDING A CUE
+# 1. Add an entry here with a name, filename, description and prompt.
+# 2. Run scripts/generate_sfx.py.
+# 3. Reference it from a play source: `sfx: <name>` beside the stage direction.
+
+effects:
+  - name: door_slam
+    file: door_slam.mp3
+    description: "A heavy door pulled shut hard — an exit in anger."
+    duration_seconds: 2
+    prompt: >-
+      A single heavy wooden door slamming shut hard in a small room, with a
+      short flat echo and a faint rattle of the frame afterwards. Dry and
+      close-miked, like a stage door effect. No music, no voices.
+
+  - name: body_thump
+    file: body_thump.mp3
+    description: "A soft bodily impact — an embrace, a shove, a puppet colliding."
+    duration_seconds: 2
+    prompt: >-
+      A soft muffled thump of one padded body colliding with another, with a
+      brief rustle of heavy cloth. Close, dry, not violent. No music, no voices.
+
+  # --- The play's signature offscreen moments -------------------------------
+  # Jarry's staging announces violence rather than depicting it, and we lean on
+  # that to keep the content past a safety filter. Offscreen violence only lands
+  # if you HEAR it, so these two carry scenes on their own.
+
+  - name: trapdoor_drop
+    file: trapdoor_drop.mp3
+    description: "A trapdoor banging open and something falling through it."
+    duration_seconds: 3
+    prompt: >-
+      A wooden trapdoor banging open on a hollow stage, followed by a heavy
+      object falling away into a space below and landing with a distant muffled
+      thud. Hollow and theatrical. No music, no voices.
+
+  - name: machine_crank
+    file: machine_crank.mp3
+    description: "An absurd contraption being cranked into motion."
+    duration_seconds: 3
+    prompt: >-
+      A large crude wooden and iron machine being cranked by hand: a ratcheting
+      handle, groaning timber, squealing ungreased metal gears turning slowly.
+      Comically overbuilt and rickety. No music, no voices.
+
+  - name: crowd_gasp
+    file: crowd_gasp.mp3
+    description: "A small assembled crowd reacting in shock."
+    duration_seconds: 2
+    prompt: >-
+      A small indoor crowd of about twenty people drawing breath sharply in
+      shock together, then falling silent. Dry and close, like an audience in a
+      small theatre. No music, no discernible words.

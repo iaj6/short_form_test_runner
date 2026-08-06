@@ -519,7 +519,7 @@ def test_concat_single_input(tmp_path: Path):
 def test_concat_rejects_empty_and_missing(tmp_path: Path):
     with pytest.raises(ValueError, match="at least one input"):
         concat_turn_audio([], tmp_path / "o.mp3")
-    with pytest.raises(FileNotFoundError, match="missing turn audio"):
+    with pytest.raises(FileNotFoundError, match="missing audio"):
         concat_turn_audio([tmp_path / "nope.mp3"], tmp_path / "o.mp3")
 
 

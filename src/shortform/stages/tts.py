@@ -22,6 +22,7 @@ from typing import Any
 from shortform.models.script import Segment, Turn, TurnTiming, WordTiming
 from shortform.models.video import VideoStatus
 from shortform.pipeline.context import PipelineContext
+from shortform.sfx import resolve as resolve_sfx
 from shortform.store.file_store import FileStore
 from shortform.tts.backend import TTSOutput, get_audio_duration
 from shortform.tts.cast import (
@@ -30,7 +31,7 @@ from shortform.tts.cast import (
     DEFAULT_TURN_GAP,
     VoiceCast,
 )
-from shortform.tts.concat import concat_turn_audio
+from shortform.tts.concat import SFX_LEAD_GAP, concat_turn_audio
 from shortform.tts.registry import get_backend
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,9 @@ async def _synthesize_dialogue(
     gaps: list[float] = []
     durations: list[float] = []
     per_turn_timings: list[list[WordTiming]] = []
+    # Sound effect played in the pause after each turn, or None. The pause a
+    # stage direction already earns is exactly where its effect belongs.
+    effects: list[Path | None] = []
 
     for t_idx, turn in enumerate(turns):
         assignment = cast.resolve(turn.speaker)
@@ -193,8 +197,9 @@ async def _synthesize_dialogue(
         durations.append(result.duration)
         per_turn_timings.append(result.word_timings)
         gaps.append(cast.gap_after(t_idx, turns))
+        effects.append(resolve_sfx(turn.sfx) if turn.sfx else None)
 
-    concat_turn_audio(turn_paths, output_path, gaps=gaps)
+    concat_turn_audio(turn_paths, output_path, gaps=gaps, gap_audio=effects)
 
     # Record where each turn landed in the joined audio. VisualGenStage slices
     # this per Veo clip so the video model is told who is speaking when —
@@ -202,11 +207,18 @@ async def _synthesize_dialogue(
     # single most obviously wrong thing about generated dialogue.
     seg.turn_timings = []
     offset = 0.0
-    for turn, turn_duration, gap in zip(turns, durations, gaps, strict=True):
+    for turn, turn_duration, gap, effect in zip(
+        turns, durations, gaps, effects, strict=True
+    ):
         seg.turn_timings.append(
             TurnTiming(speaker=turn.speaker, start=offset, duration=turn_duration)
         )
         offset += turn_duration + gap
+        if effect is not None:
+            # An effect inserted mid-segment pushes every later turn back. Miss
+            # this and the video's speech schedule drifts out of step with the
+            # audio for the rest of the segment — the wrong puppet's mouth moves.
+            offset += SFX_LEAD_GAP + get_audio_duration(effect)
 
     # Measure the joined file rather than summing the parts: the concat filter's
     # resample + MP3 frame padding shifts the total by a few milliseconds, and

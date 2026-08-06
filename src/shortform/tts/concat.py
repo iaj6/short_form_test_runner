@@ -30,6 +30,50 @@ logger = logging.getLogger(__name__)
 SEGMENT_SAMPLE_RATE = 44100
 SEGMENT_BITRATE = "128k"
 
+# Beat between the end of a line and a sound effect that follows it, so the
+# effect doesn't clip the tail of the speech.
+SFX_LEAD_GAP = 0.15
+
+
+def build_clip_plan(
+    inputs: list[Path],
+    gaps: list[float] | None = None,
+    gap_audio: list[Path | None] | None = None,
+) -> list[tuple[Path, float]]:
+    """Ordered (audio, silence-after) pairs for one segment.
+
+    Turns and sound effects are the same kind of thing here — a file with a pad
+    after it — so an effect is simply another clip inserted after the line it
+    annotates:
+
+        line  ->  SFX_LEAD_GAP  ->  effect  ->  gap  ->  next line
+
+    Returned rather than used directly so callers can compute where each turn
+    LANDS without re-deriving the layout. The video stage tells the model who
+    speaks when using those offsets, and an effect inserted mid-segment shifts
+    every turn after it — computing the plan once means the audio and the
+    speech schedule can't disagree.
+
+    The final pad is forced to zero: assembly controls spacing between segments,
+    and a trailing pad desyncs the video mux.
+    """
+    padded = list(gaps or [])
+    padded = (padded + [0.0] * len(inputs))[: len(inputs)]
+    effects = list(gap_audio or [])
+    effects = (effects + [None] * len(inputs))[: len(inputs)]
+
+    plan: list[tuple[Path, float]] = []
+    for turn_audio, gap, effect in zip(inputs, padded, effects, strict=True):
+        if effect is not None:
+            plan.append((turn_audio, SFX_LEAD_GAP))
+            plan.append((effect, gap))
+        else:
+            plan.append((turn_audio, gap))
+
+    if plan:
+        plan[-1] = (plan[-1][0], 0.0)
+    return plan
+
 
 def concat_turn_audio(
     inputs: list[Path],
@@ -37,13 +81,14 @@ def concat_turn_audio(
     gaps: list[float] | None = None,
     sample_rate: int = SEGMENT_SAMPLE_RATE,
     bitrate: str = SEGMENT_BITRATE,
+    gap_audio: list[Path | None] | None = None,
 ) -> None:
     """Join `inputs` into `output_path` with `gaps[i]` seconds of silence after
     input i.
 
-    `gaps` is padded with zeros / truncated to match `inputs`. The last entry is
-    forced to zero — no trailing silence on a segment, since assembly controls
-    spacing between segments and a trailing pad would desync the video mux.
+    `gap_audio[i]`, when set, places a sound effect in that gap instead of plain
+    silence — the pause a stage direction already earns is exactly where its
+    effect belongs.
 
     A single input still round-trips through the same filtergraph rather than
     being copied: one code path, one output profile, no "worked with 2+ turns
@@ -52,25 +97,22 @@ def concat_turn_audio(
     if not inputs:
         raise ValueError("concat_turn_audio requires at least one input")
 
-    missing = [str(p) for p in inputs if not p.exists()]
+    plan = build_clip_plan(inputs, gaps, gap_audio)
+    missing = [str(path) for path, _ in plan if not path.exists()]
     if missing:
         raise FileNotFoundError(
-            f"concat_turn_audio: missing turn audio: {', '.join(missing)}"
+            f"concat_turn_audio: missing audio: {', '.join(missing)}"
         )
-
-    padded = list(gaps or [])
-    padded = (padded + [0.0] * len(inputs))[: len(inputs)]
-    padded[-1] = 0.0
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     args = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning"]
-    for path in inputs:
+    for path, _ in plan:
         args += ["-i", str(path)]
 
     chains: list[str] = []
     labels: list[str] = []
-    for i, gap in enumerate(padded):
+    for i, (_, gap) in enumerate(plan):
         chain = (
             f"[{i}:a]aresample={sample_rate}"
             f",aformat=sample_fmts=fltp:channel_layouts=mono"
@@ -87,7 +129,7 @@ def concat_turn_audio(
         ";".join(chains)
         + ";"
         + "".join(labels)
-        + f"concat=n={len(inputs)}:v=0:a=1[out]"
+        + f"concat=n={len(plan)}:v=0:a=1[out]"
     )
 
     args += [
@@ -100,12 +142,15 @@ def concat_turn_audio(
         str(output_path),
     ]
 
-    logger.debug("Concatenating %d turns → %s", len(inputs), output_path.name)
+    logger.debug(
+        "Concatenating %d clip(s) from %d turn(s) → %s",
+        len(plan), len(inputs), output_path.name,
+    )
     result = subprocess.run(args, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
             f"Turn audio concat failed for {output_path.name} "
-            f"({len(inputs)} inputs): {result.stderr[-800:]}"
+            f"({len(plan)} clips): {result.stderr[-800:]}"
         )
     if not output_path.exists():
         raise RuntimeError(

@@ -34,6 +34,11 @@ data/music/**/*.ogg
 # which are large pools of rejected generations and pure disposable output.
 data/character_refs/**/candidates/
 
+# Sound effects: ignore the generated audio, TRACK the library manifest so
+# the library stays reproducible from the repo (same split as music).
+data/sfx/*.mp3
+data/sfx/*.wav
+
 # Adapted play/script sources. Text you translate or adapt is content rather than
 # code, and depending on the source it may carry rights obligations — keep it
 # local and decide deliberately what to publish.
