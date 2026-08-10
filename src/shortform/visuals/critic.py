@@ -334,13 +334,39 @@ def _verdict_from(payload: dict[str, Any]) -> Verdict:
     )
 
 
+# Magic bytes -> media type. A file's extension is not evidence of its format:
+# reference images written straight from an image API's response bytes can carry
+# a .png name while actually being JPEG, and the API rejects the mismatch with a
+# 400 that reads like a code bug rather than a data one.
+_IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def detect_media_type(data: bytes) -> str:
+    """Media type from the bytes themselves, defaulting to PNG.
+
+    WEBP needs a two-part check: "RIFF" then "WEBP" four bytes later.
+    """
+    for signature, media_type in _IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return media_type
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
 def _image_block(path: Path) -> dict[str, Any]:
+    data = path.read_bytes()
     return {
         "type": "image",
         "source": {
             "type": "base64",
-            "media_type": "image/png",
-            "data": base64.standard_b64encode(path.read_bytes()).decode("utf-8"),
+            "media_type": detect_media_type(data),
+            "data": base64.standard_b64encode(data).decode("utf-8"),
         },
     }
 

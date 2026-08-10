@@ -120,6 +120,16 @@ def edit_variant(
         blob = " ".join((getattr(p, "text", "") or "") for p in parts)[:300]
         raise RuntimeError(f"no image in response for {out_path.name}; text: {blob!r}")
 
+    # The edit API may return JPEG even when the manifest names a .png. Writing
+    # the bytes under the wrong extension produces a file whose name lies about
+    # its format, which later breaks anything that trusts the extension.
+    returned_type = getattr(image_part.inline_data, "mime_type", "") or ""
+    if returned_type and not returned_type.endswith(out_path.suffix.lstrip(".")):
+        print(
+            f"  [note] {out_path.name} is actually {returned_type} — "
+            f"content is correct, but the extension does not match"
+        )
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(image_part.inline_data.data)
 

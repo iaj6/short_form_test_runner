@@ -150,6 +150,8 @@ After each clip is generated, frames are sampled and sent to Claude alongside th
 
 **Bias toward passing.** A false positive costs one extra clip; a false negative costs a broken episode. But a critic that flags everything burns the budget and trains you to ignore it, so the prompt says explicitly: flag clear failures, and when uncertain, pass.
 
+**A file's extension is not evidence of its format.** `detect_media_type` sniffs magic bytes (PNG/JPEG/GIF/WEBP, defaulting to PNG) rather than trusting the suffix, because reference images written straight from an image API's response bytes routinely carry a `.png` name while actually being JPEG. The old hardcoded `image/png` made the API reject the request with a 400 that reads like a code bug rather than a data one. `scripts/generate_refs.py` prints a note when the edit API hands back a type that doesn't match the manifest's filename — the content is fine, the name just lies.
+
 ## Multi-clip + last-frame chaining
 
 Veo is hard-locked at ~8 seconds per clip; F5-TTS typically narrates 14–22 seconds per segment. The gap is bridged in `VisualGenStage`:

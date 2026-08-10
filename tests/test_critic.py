@@ -297,3 +297,42 @@ async def test_no_critic_generates_once_and_skips_review(tmp_path: Path):
     )
     assert len(backend.calls) == 1
     assert reviews == []
+
+
+# --- Media type detection ---------------------------------------------------
+#
+# A file's extension is not evidence of its format. A reference image written
+# straight from an image API's response bytes carried a .png name while being
+# JPEG; the hardcoded media_type produced a 400 that read like a code bug.
+
+
+def test_detects_png():
+    from shortform.visuals.critic import detect_media_type
+
+    assert detect_media_type(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32) == "image/png"
+
+
+def test_detects_jpeg_regardless_of_extension():
+    from shortform.visuals.critic import detect_media_type
+
+    assert detect_media_type(b"\xff\xd8\xff\xe0" + b"\x00" * 32) == "image/jpeg"
+
+
+def test_detects_webp():
+    from shortform.visuals.critic import detect_media_type
+
+    assert detect_media_type(b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 16) == "image/webp"
+
+
+def test_unknown_bytes_default_to_png():
+    from shortform.visuals.critic import detect_media_type
+
+    assert detect_media_type(b"not an image") == "image/png"
+
+
+def test_image_block_uses_the_real_type(tmp_path: Path):
+    from shortform.visuals.critic import _image_block
+
+    jpeg = tmp_path / "misnamed.png"          # .png name, JPEG bytes
+    jpeg.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 64)
+    assert _image_block(jpeg)["source"]["media_type"] == "image/jpeg"
