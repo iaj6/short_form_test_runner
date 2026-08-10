@@ -41,9 +41,16 @@ def test_camera_move_without_base_style():
 
 
 def _stage(reuse: bool = True):
+    """A stage with reuse already resolved for the run.
+
+    `_cached` is gated on per-run provenance (see _reuse_allowed); these tests
+    exercise `_cached` itself, so the gate is set directly.
+    """
     from shortform.stages.visual_gen import VisualGenStage
 
-    return VisualGenStage(backend=None, reuse_existing=reuse)
+    stage = VisualGenStage(backend=None, reuse_existing=reuse)
+    stage._reuse_this_run = reuse
+    return stage
 
 
 def _real_mp4(path: Path, seconds: float = 1.0) -> Path:
@@ -189,3 +196,77 @@ def test_veo_prompt_appends_schedule_as_its_own_sentence():
     assert _build_animation_prompt("a room", "claymation") == (
         "claymation, a room, smooth motion, high quality"
     )
+
+
+# --- Backend-aware clip reuse -----------------------------------------------
+#
+# A Veo run resuming into a directory left by a cheap Pillow pass silently
+# reused the stills, called Veo zero times, and reported success — and the
+# batch runner then wrote a manifest claiming the episode WAS rendered with
+# Veo, so the lie persisted and every later run skipped it.
+
+
+def _stage_for(backend_name: str):
+    from shortform.stages.visual_gen import VisualGenStage
+
+    class _Backend:
+        name = backend_name
+
+        async def generate(self, **kw):  # pragma: no cover - not called here
+            raise AssertionError("not used")
+
+    return VisualGenStage(backend=_Backend())
+
+
+def test_reuse_allowed_when_backend_matches(tmp_path: Path):
+    from shortform.stages.visual_gen import PROVENANCE_FILE
+
+    (tmp_path / PROVENANCE_FILE).write_text("veo")
+    assert _stage_for("veo")._reuse_allowed(tmp_path) is True
+
+
+def test_reuse_denied_when_backend_differs(tmp_path: Path):
+    """THE bug: a pillow pass must not satisfy a veo run."""
+    from shortform.stages.visual_gen import PROVENANCE_FILE
+
+    (tmp_path / PROVENANCE_FILE).write_text("pillow")
+    (tmp_path / "segment_00.png").write_bytes(b"still")
+    assert _stage_for("veo")._reuse_allowed(tmp_path) is False
+
+
+def test_reuse_denied_when_provenance_unknown(tmp_path: Path):
+    """Clips with no recorded backend predate the check — regenerate rather
+    than assume, since a wrong reuse ships the wrong video silently."""
+    (tmp_path / "segment_00.png").write_bytes(b"still")
+    assert _stage_for("veo")._reuse_allowed(tmp_path) is False
+
+
+def test_empty_directory_is_reusable(tmp_path: Path):
+    """Nothing to reuse, but nothing to warn about either — a fresh run."""
+    assert _stage_for("veo")._reuse_allowed(tmp_path) is True
+
+
+def test_regenerate_flag_overrides_matching_provenance(tmp_path: Path):
+    from shortform.stages.visual_gen import PROVENANCE_FILE, VisualGenStage
+
+    (tmp_path / PROVENANCE_FILE).write_text("veo")
+
+    class _Backend:
+        name = "veo"
+
+        async def generate(self, **kw):  # pragma: no cover
+            raise AssertionError("not used")
+
+    stage = VisualGenStage(backend=_Backend(), reuse_existing=False)
+    assert stage._reuse_allowed(tmp_path) is False
+
+
+def test_provenance_is_recorded_for_the_resume(tmp_path: Path):
+    """Written at the START of a run, so an interrupted one still resumes into
+    its own clips."""
+    from shortform.stages.visual_gen import PROVENANCE_FILE
+
+    stage = _stage_for("veo")
+    stage._record_provenance(tmp_path)
+    assert (tmp_path / PROVENANCE_FILE).read_text() == "veo"
+    assert stage._reuse_allowed(tmp_path) is True

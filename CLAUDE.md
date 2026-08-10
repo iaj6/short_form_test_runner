@@ -102,7 +102,7 @@ uv run shortform batch data/scripts/*.json --dry-run     # plan, spend nothing
 
 **Deterministic video ids are the load-bearing piece.** `generate-from-script` mints a random id per run, so assets land in a fresh directory and a re-run regenerates everything. In batch mode **the video id IS the script id**, so assets are addressable (`data/assets/<script_id>/`), outputs sort by episode, and a re-run automatically reuses every clip the previous attempt paid for. Without this, resuming a half-finished batch costs full price twice.
 
-**Skip / resume.** Finished episodes are skipped outright; partial ones resume from their existing clips via the reuse path in `visual_gen`. Verified: a full 3-episode re-run took 1.2s and spent nothing.
+**Skip / resume.** Finished episodes are skipped outright; partial ones resume from their existing clips via the reuse path in `visual_gen` — which is itself backend-gated, see below. Verified: a full 3-episode re-run took 1.2s and spent nothing.
 
 **Failure isolation, with one exception.** An episode failing isolates to itself and the batch continues. Depleted Veo credits abort the run — every remaining episode would fail identically, so continuing just burns wall-clock. The credit sniff is shared with `veo_backend`'s retry ladder (`is_credits_error`) so the two can't drift.
 
@@ -118,6 +118,17 @@ uv run shortform batch data/scripts/*.json --dry-run     # plan, spend nothing
 | manifest but video deleted, or corrupt manifest | render |
 
 Without this, a cheap `-vb pillow` test run marks every episode finished and a later Veo pass renders nothing at all. The manifest also carries the critic's flagged/unverified clips, so `data/videos/` is self-describing without re-reading the run log.
+
+**Clip reuse is backend-gated too** (`PROVENANCE_FILE` in `visual_gen.py`), and this is a *separate* check from the manifest above — they guard different things and you need both. The manifest decides whether an episode is skipped entirely; `.visual_backend`, written inside `data/assets/<video_id>/`, decides whether individual clips already in that directory may be reused. Skipping the manifest check but not this one means a Veo run resuming into a directory left by a Pillow pass silently reuses the stills, calls Veo zero times, reports success — and then the batch runner writes a manifest claiming the episode *was* rendered with Veo, so the lie persists and every later run skips it.
+
+| state of `data/assets/<video_id>/` | action |
+|---|---|
+| marker matches the current backend | reuse existing clips |
+| marker names a different backend | regenerate, warning that the clips don't match |
+| clips present, no marker (predates this check) | regenerate — provenance unknown, so don't assume |
+| empty directory | nothing to reuse; nothing to warn about |
+
+The marker is written at the **start** of a run, not the end, so an interrupted run still resumes into its own clips rather than treating them as unknown-provenance. `--regenerate` (i.e. `reuse_existing=False`) overrides a matching marker.
 
 Sequential on purpose: Veo is rate-limited, and a batch you can Ctrl-C without leaving half-written parallel state is worth more than the wall-clock a concurrent version would save.
 

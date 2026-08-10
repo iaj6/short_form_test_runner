@@ -38,6 +38,14 @@ CLIP_TARGET_SECONDS = 7.5
 # chain anchor and re-anchors to the hero reference — see _generate_reviewed.
 CRITIC_MAX_ATTEMPTS = 3
 
+# Records which backend produced the clips in a working directory. Clip reuse
+# without this is backend-blind: a Veo run resuming into a directory left by a
+# cheap Pillow pass silently reuses the stills, calls Veo zero times, and
+# reports success. Worse, the batch runner then writes a manifest claiming the
+# episode was rendered with Veo — so the lie persists and every later run skips
+# it. Cheap file, expensive absence.
+PROVENANCE_FILE = ".visual_backend"
+
 
 class VisualGenStage:
     def __init__(
@@ -57,6 +65,8 @@ class VisualGenStage:
         # effect when the run resumes into an existing video id
         # (`generate-from-script --video-id`), since a fresh id gets a fresh dir.
         self._reuse_existing = reuse_existing
+        # Set per run in execute(), once the working directory is known.
+        self._reuse_this_run = False
 
     @property
     def name(self) -> str:
@@ -67,6 +77,45 @@ class VisualGenStage:
         if not ctx.script.segments:
             errors.append("No script segments for visual generation")
         return errors
+
+    def _reuse_allowed(self, video_dir: Path) -> bool:
+        """Whether clips already in `video_dir` were made by this backend.
+
+        Written at the START of a run so an interrupted one still resumes into
+        its own clips. A missing marker means the directory predates this check
+        and its provenance is unknown — regenerate, because a wasted re-render
+        costs money while a wrong reuse silently ships the wrong video.
+        """
+        if not self._reuse_existing:
+            return False
+
+        marker = video_dir / PROVENANCE_FILE
+        previous = marker.read_text().strip() if marker.exists() else ""
+        if previous == self._backend.name:
+            return True
+
+        if previous:
+            logger.warning(
+                "Existing clips in %s were made with '%s', not '%s' — "
+                "regenerating rather than reusing them",
+                video_dir.name, previous, self._backend.name,
+            )
+            return False
+
+        if any(video_dir.glob("segment_*")):
+            logger.warning(
+                "Existing clips in %s have no recorded backend — regenerating "
+                "rather than assuming they match '%s'",
+                video_dir.name, self._backend.name,
+            )
+            return False
+
+        # Fresh directory: nothing to conflict with, and nothing to reuse.
+        return True
+
+    def _record_provenance(self, video_dir: Path) -> None:
+        video_dir.mkdir(parents=True, exist_ok=True)
+        (video_dir / PROVENANCE_FILE).write_text(self._backend.name)
 
     def _cached(self, output_stem: Path, width: int, height: int) -> VisualOutput | None:
         """An already-generated asset for this output stem, or None to generate.
@@ -79,7 +128,7 @@ class VisualGenStage:
         silently reusing that would produce a broken episode far downstream —
         much more expensive to diagnose than the regeneration it saves.
         """
-        if not self._reuse_existing:
+        if not self._reuse_this_run:
             return None
 
         for suffix, out_type in (
@@ -233,6 +282,11 @@ class VisualGenStage:
         critic_reviews: list[dict[str, Any]] = ctx.artifacts.setdefault(
             "critic_reviews", []
         )
+
+        # Provenance gates clip reuse for the whole run, so decide once.
+        run_dir = file_store.video_dir(ctx.video.id)
+        self._reuse_this_run = self._reuse_allowed(run_dir)
+        self._record_provenance(run_dir)
 
         for seg in ctx.script.segments:
             video_dir = file_store.video_dir(ctx.video.id)
