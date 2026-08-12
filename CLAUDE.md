@@ -124,11 +124,13 @@ Without this, a cheap `-vb pillow` test run marks every episode finished and a l
 | state of `data/assets/<video_id>/` | action |
 |---|---|
 | marker matches the current backend | reuse existing clips |
-| marker names a different backend | regenerate, warning that the clips don't match |
-| clips present, no marker (predates this check) | regenerate — provenance unknown, so don't assume |
+| marker names a different backend | clear the visuals, regenerate, warn |
+| clips present, no marker (predates this check) | clear the visuals, regenerate — provenance unknown, so don't assume |
 | empty directory | nothing to reuse; nothing to warn about |
 
 The marker is written at the **start** of a run, not the end, so an interrupted run still resumes into its own clips rather than treating them as unknown-provenance. `--regenerate` (i.e. `reuse_existing=False`) overrides a matching marker.
+
+**Refusing to reuse is not sufficient on its own — the refused artifacts have to be deleted**, which is why the two mismatch rows above clear before regenerating. A run only overwrites the artifacts it actually regenerates, so whatever the previous backend left for a segment this run finishes differently, or never reaches, survives. The directory then gets stamped with *this* backend's name, and the next run sees a matching marker, trusts the whole directory, and reuses the leftovers. Provenance is per-directory; contents are not. Found in Ubu Rex e03: a killed Veo run left three 10 KB Pillow stills inside a directory marked `veo`, and segment 2 had *only* the still — a resume would have muxed a Pillow frame into a Veo episode and the manifest would have called it Veo. Clearing is visuals-only (`segment_*.mp4` / `segment_*.png`): `segment_NN.mp3` and `segment_NN_turns/` belong to TTS, cost real money to resynthesize, and have nothing to do with which visual backend ran.
 
 Sequential on purpose: Veo is rate-limited, and a batch you can Ctrl-C without leaving half-written parallel state is worth more than the wall-clock a concurrent version would save.
 

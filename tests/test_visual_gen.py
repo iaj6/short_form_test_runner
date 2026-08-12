@@ -270,3 +270,87 @@ def test_provenance_is_recorded_for_the_resume(tmp_path: Path):
     stage._record_provenance(tmp_path)
     assert (tmp_path / PROVENANCE_FILE).read_text() == "veo"
     assert stage._reuse_allowed(tmp_path) is True
+
+
+# --- Clearing what we refuse to reuse ---------------------------------------
+#
+# Refusing to reuse is not enough. A run only overwrites what it regenerates,
+# so a previous backend's leftovers survive — and the directory is then stamped
+# with THIS backend's name, so the NEXT run sees a matching marker and reuses
+# them. Found in Ubu Rex e03: three 10KB Pillow stills inside a directory
+# marked `veo`, one of them the only visual segment 2 had.
+
+
+def _pillow_dir(tmp_path: Path) -> Path:
+    """A directory as a Pillow pass leaves it: stills, audio, no marker."""
+    for i in range(3):
+        (tmp_path / f"segment_{i:02d}.png").write_bytes(b"still")
+        (tmp_path / f"segment_{i:02d}.mp3").write_bytes(b"audio")
+        (tmp_path / f"segment_{i:02d}_turns").mkdir()
+    return tmp_path
+
+
+def test_stale_visuals_are_cleared_when_reuse_is_refused(tmp_path: Path):
+    _pillow_dir(tmp_path)
+    stage = _stage_for("veo")
+
+    assert stage._reuse_allowed(tmp_path) is False
+    stage._clear_stale_visuals(tmp_path)
+    assert list(tmp_path.glob("segment_*.png")) == []
+
+
+def test_clearing_never_touches_the_audio(tmp_path: Path):
+    """TTS is a different stage's output and costs real money to redo."""
+    _pillow_dir(tmp_path)
+    _stage_for("veo")._clear_stale_visuals(tmp_path)
+
+    assert len(list(tmp_path.glob("segment_*.mp3"))) == 3
+    assert len(list(tmp_path.glob("segment_*_turns"))) == 3
+
+
+def test_clearing_removes_clips_and_lastframes(tmp_path: Path):
+    (tmp_path / "segment_00.mp4").write_bytes(b"clip")
+    (tmp_path / "segment_00_clip_01.mp4").write_bytes(b"clip")
+    (tmp_path / "segment_00_lastframe.png").write_bytes(b"frame")
+    (tmp_path / "segment_00_concat.mp4").write_bytes(b"concat")
+
+    _stage_for("veo")._clear_stale_visuals(tmp_path)
+    assert list(tmp_path.glob("segment_*")) == []
+
+
+def test_clearing_an_empty_directory_is_a_no_op(tmp_path: Path):
+    _stage_for("veo")._clear_stale_visuals(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_e03_sequence_cannot_leave_reusable_leftovers(tmp_path: Path):
+    """THE bug, end to end.
+
+    Pillow pass, then a Veo run that refuses to reuse and stamps the directory,
+    then a second Veo run. The second run sees a matching marker and trusts the
+    directory — so the first Veo run must have left nothing to trust wrongly.
+    """
+    from shortform.stages.visual_gen import PROVENANCE_FILE
+
+    _pillow_dir(tmp_path)
+    veo = _stage_for("veo")
+
+    # First Veo run: refuses the stills, clears them, claims the directory.
+    assert veo._reuse_allowed(tmp_path) is False
+    veo._clear_stale_visuals(tmp_path)
+    veo._record_provenance(tmp_path)
+
+    # It regenerates only segments 0 and 1 before being killed — segment 2
+    # never gets a visual at all.
+    (tmp_path / "segment_00.mp4").write_bytes(b"veo clip")
+    (tmp_path / "segment_01.mp4").write_bytes(b"veo clip")
+
+    # Second Veo run: marker matches, so reuse is on.
+    assert _stage_for("veo")._reuse_allowed(tmp_path) is True
+    assert (tmp_path / PROVENANCE_FILE).read_text() == "veo"
+    # Segment 2 has nothing to reuse, so it generates rather than silently
+    # muxing a Pillow still into a Veo episode.
+    assert not (tmp_path / "segment_02.png").exists()
+    assert not (tmp_path / "segment_02.mp4").exists()
+    # And the audio survived both runs.
+    assert (tmp_path / "segment_02.mp3").exists()

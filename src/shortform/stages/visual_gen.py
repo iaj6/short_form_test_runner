@@ -113,6 +113,39 @@ class VisualGenStage:
         # Fresh directory: nothing to conflict with, and nothing to reuse.
         return True
 
+    def _clear_stale_visuals(self, video_dir: Path) -> None:
+        """Delete visual artifacts this run has decided not to reuse.
+
+        Refusing to reuse is not enough on its own. A run only overwrites the
+        artifacts it actually regenerates, so anything the previous backend left
+        behind for a segment this run finishes differently — or never reaches —
+        survives. The directory is then stamped with THIS backend's name, and
+        the next run sees a matching marker, trusts the whole directory, and
+        reuses the leftovers. Provenance is per-directory; contents are not,
+        unless the mismatch is cleaned up at the point it is detected.
+
+        Found in Ubu Rex e03: a killed Veo run left three 10KB Pillow stills
+        from an earlier pass inside a directory marked `veo`, and segment 2 had
+        only the still. A resume would have muxed it into the episode.
+
+        Visuals only. The audio (`segment_NN.mp3`, `segment_NN_turns/`) is a
+        different stage's output, costs real money to resynthesize, and has
+        nothing to do with which visual backend ran.
+        """
+        stale = [
+            p for p in video_dir.glob("segment_*")
+            if p.is_file() and p.suffix in {".mp4", ".png"}
+        ]
+        if not stale:
+            return
+        for path in stale:
+            path.unlink()
+        logger.info(
+            "Cleared %d stale visual artifact(s) from %s so a later run cannot "
+            "mistake them for '%s' output",
+            len(stale), video_dir.name, self._backend.name,
+        )
+
     def _record_provenance(self, video_dir: Path) -> None:
         video_dir.mkdir(parents=True, exist_ok=True)
         (video_dir / PROVENANCE_FILE).write_text(self._backend.name)
@@ -290,6 +323,11 @@ class VisualGenStage:
         # Provenance gates clip reuse for the whole run, so decide once.
         run_dir = file_store.video_dir(ctx.video.id)
         self._reuse_this_run = self._reuse_allowed(run_dir)
+        if not self._reuse_this_run:
+            # Clear before stamping. Anything left behind would sit in a
+            # directory about to claim this backend's name, and the next run
+            # would reuse it on the strength of that claim.
+            self._clear_stale_visuals(run_dir)
         self._record_provenance(run_dir)
 
         for seg in ctx.script.segments:
