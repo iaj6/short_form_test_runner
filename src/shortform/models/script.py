@@ -131,6 +131,27 @@ class Segment:
                 seen.append(t.speaker)
         return seen
 
+    @property
+    def staged_action(self) -> str:
+        """What the script directs to physically happen in this shot.
+
+        The continuity critic compares a clip against a static hero reference,
+        so a scripted departure ("PERE UBU going out") reads as the character
+        having gone MISSING — a fatal identity failure — and burns the whole
+        regenerate ladder trying to fix a shot that is doing what it was told.
+        Handing the critic the intended action lets it tell "the model lost the
+        character" apart from "the script sent the character offstage".
+
+        Same `SPEAKER direction; SPEAKER direction` shape that `adapt_play.py`
+        composes into the visual prompt's `Action:` clause, built here from the
+        structured turns rather than parsed back out of that prose.
+        """
+        return "; ".join(
+            f"{t.speaker} {t.stage_direction}".strip()
+            for t in self.turns
+            if t.stage_direction.strip()
+        )
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Segment:
         """Rehydrate from a plain dict (script JSON, or the DB's segments_json).

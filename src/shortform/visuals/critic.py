@@ -80,6 +80,8 @@ has drifted so far out of frame they are effectively gone.
 left is now on the right).
 - A NEW character appears who is not in the reference.
 - The setting has changed to a visibly different location.
+- The frames are BLANK — solid black, solid white, or otherwise empty of any \
+subject and setting. Report this as `blank_frames`.
 
 Report these as `minor` (informational; they will not trigger a regenerate):
 - Texture, sharpness, or color degradation relative to the reference.
@@ -94,6 +96,18 @@ distinctive, stable features — silhouette, hair, garment colour and shape — 
 by fine detail that a video model will naturally vary.
 3. A character turning, gesturing, opening their mouth, or being partially \
 occluded is NORMAL. Do not report it.
+4. If you are given the shot's INTENDED ACTION, judge against it as well as \
+against the reference. The reference is a single frozen frame from the start of \
+the shot; the action is what the script asks to happen during it. When the \
+action says a character leaves, exits, goes out, or is sent away, their absence \
+later in the shot is the shot working — do NOT report `character_missing`. \
+Likewise, a door, window, or piece of set the action requires is not a \
+`new_character` or an unexplained change. A character the action does not \
+mention should still be present throughout.
+5. Rule 4 never excuses an empty shot. "The character exited" explains one \
+character leaving frame; it does not explain black or empty frames, a vanished \
+setting, or every character disappearing at once. Report those as `blank_frames` \
+or `setting_changed` no matter what the intended action says.
 """
 
 VERDICT_TOOL: dict[str, Any] = {
@@ -118,6 +132,7 @@ VERDICT_TOOL: dict[str, Any] = {
                                 "characters_swapped",
                                 "new_character",
                                 "setting_changed",
+                                "blank_frames",
                                 "quality_degraded",
                                 "set_dressing_changed",
                                 "camera_moved",
@@ -244,8 +259,14 @@ class ClipCritic:
         reference_path: Path,
         work_dir: Path,
         expected_characters: str = "",
+        intended_action: str = "",
     ) -> Verdict:
         """Compare `clip_path` against `reference_path`.
+
+        `intended_action` is what the script directs to happen during the shot.
+        Without it the critic judges purely against a frozen reference frame, so
+        a scripted exit is indistinguishable from the model losing a character —
+        see `Segment.staged_action`.
 
         Returns a passing, `unverified` verdict on any failure to check — a
         broken critic must never block a render.
@@ -265,13 +286,19 @@ class ClipCritic:
             )
 
         try:
-            return self._ask(frames, reference_path, expected_characters)
+            return self._ask(
+                frames, reference_path, expected_characters, intended_action
+            )
         except Exception as e:  # noqa: BLE001 — a critic must not break a render
             logger.warning("Clip critic failed on %s: %s", clip_path.name, e)
             return Verdict(True, summary=f"critic error: {e}", unverified=True)
 
     def _ask(
-        self, frames: list[Path], reference_path: Path, expected_characters: str
+        self,
+        frames: list[Path],
+        reference_path: Path,
+        expected_characters: str,
+        intended_action: str = "",
     ) -> Verdict:
         import anthropic
 
@@ -292,6 +319,12 @@ class ClipCritic:
         ask = "Compare the generated frames against the reference and report continuity failures."
         if expected_characters:
             ask += f"\n\nCharacters who should be present: {expected_characters}."
+        if intended_action:
+            ask += (
+                f"\n\nINTENDED ACTION for this shot: {intended_action}."
+                "\nThe reference is the shot's starting frame, not its ending one."
+                " Anything this action calls for is expected, not a failure."
+            )
         content.append({"type": "text", "text": ask})
 
         client = anthropic.Anthropic(api_key=self.api_key)

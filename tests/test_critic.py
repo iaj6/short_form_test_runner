@@ -184,9 +184,14 @@ class _ScriptedCritic:
     def __init__(self, failures: int) -> None:
         self.failures = failures
         self.reviews = 0
+        self.seen_actions: list[str] = []
 
-    def review(self, clip_path, reference_path, work_dir, expected_characters=""):
+    def review(
+        self, clip_path, reference_path, work_dir, expected_characters="",
+        intended_action="",
+    ):
         self.reviews += 1
+        self.seen_actions.append(intended_action)
         if self.reviews <= self.failures:
             return _verdict_from({
                 "issues": [{"kind": "character_replaced", "severity": FATAL,
@@ -336,3 +341,125 @@ def test_image_block_uses_the_real_type(tmp_path: Path):
     jpeg = tmp_path / "misnamed.png"          # .png name, JPEG bytes
     jpeg.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 64)
     assert _image_block(jpeg)["source"]["media_type"] == "image/jpeg"
+
+
+# --- Scripted action vs. lost character -------------------------------------
+#
+# The critic compares a clip against a static hero reference, so a stage
+# direction that sends a character offstage ("PERE UBU going out, slamming the
+# door") reads as `character_missing` — fatal. Ubu Rex e03 segment 1 burned all
+# three regenerate attempts on each of three clips, nine Veo calls, and kept
+# clips the critic still considered broken. The shot was doing what the script
+# asked; the critic just had no way to know that.
+
+
+def test_staged_action_joins_the_stage_directions():
+    seg = Segment(
+        index=0,
+        turns=[
+            Turn(speaker="MERE UBU", line="Oh! Shitre!", stage_direction="aside"),
+            Turn(speaker="PERE UBU", line="By my green candle!",
+                 stage_direction="going out, slamming the door"),
+        ],
+    )
+    assert seg.staged_action == (
+        "MERE UBU aside; PERE UBU going out, slamming the door"
+    )
+
+
+def test_staged_action_is_empty_without_directions():
+    """The overwhelmingly common case — no directions, nothing to tell the
+    critic, and the prompt gains no INTENDED ACTION section at all."""
+    seg = Segment(index=0, turns=[Turn(speaker="MERE UBU", line="Shitre.")])
+    assert seg.staged_action == ""
+
+
+def test_staged_action_skips_turns_that_have_none():
+    seg = Segment(
+        index=0,
+        turns=[
+            Turn(speaker="MERE UBU", line="a"),
+            Turn(speaker="PERE UBU", line="b", stage_direction="going out"),
+            Turn(speaker="MERE UBU", line="c"),
+        ],
+    )
+    assert seg.staged_action == "PERE UBU going out"
+
+
+def test_single_narrator_segment_has_no_staged_action():
+    """Strategies without dialogue carry no turns, so nothing changes for them."""
+    assert Segment(index=0, narration="A quiet room.").staged_action == ""
+
+
+def test_review_forwards_the_intended_action(tmp_path: Path, monkeypatch):
+    critic = ClipCritic(api_key="sk-test")
+    clip = _clip(tmp_path / "c.mp4")
+    ref = _png(tmp_path / "ref.png")
+    captured: dict[str, Any] = {}
+
+    def spy(frames, reference_path, expected_characters, intended_action=""):
+        captured["action"] = intended_action
+        return _verdict_from({"issues": [], "summary": "ok"})
+
+    monkeypatch.setattr(critic, "_ask", spy)
+    critic.review(clip, ref, tmp_path, intended_action="PERE UBU going out")
+    assert captured["action"] == "PERE UBU going out"
+
+
+@pytest.mark.asyncio
+async def test_stage_hands_the_critic_the_scripted_action(tmp_path: Path):
+    """THE fix: the exit reaches the critic instead of being invisible to it."""
+    from shortform.stages.visual_gen import VisualGenStage
+
+    seg = Segment(
+        index=1, visual_prompt="x",
+        turns=[Turn(speaker="PERE UBU", line="Off I go.",
+                    stage_direction="going out, slamming the door")],
+    )
+    critic = _ScriptedCritic(failures=0)
+    stage = VisualGenStage(backend=_FakeBackend(tmp_path), critic=critic)
+
+    await stage._generate_reviewed(
+        segment=seg, output_path=tmp_path / "seg", width=1080, height=1920,
+        config={"reference_image": "ref.png"}, label="test",
+        reference_path="ref.png", work_dir=tmp_path, expected_characters="",
+        reviews=[],
+    )
+    assert critic.seen_actions == ["PERE UBU going out, slamming the door"]
+
+
+@pytest.mark.asyncio
+async def test_segment_without_directions_sends_no_action(tmp_path: Path):
+    from shortform.stages.visual_gen import VisualGenStage
+
+    critic = _ScriptedCritic(failures=0)
+    stage = VisualGenStage(backend=_FakeBackend(tmp_path), critic=critic)
+
+    await stage._generate_reviewed(
+        segment=_segment(), output_path=tmp_path / "seg", width=1080, height=1920,
+        config={"reference_image": "ref.png"}, label="test",
+        reference_path="ref.png", work_dir=tmp_path, expected_characters="",
+        reviews=[],
+    )
+    assert critic.seen_actions == [""]
+
+
+def test_blank_frames_is_a_reportable_kind():
+    """Rule 4 excuses a scripted exit; rule 5 stops it excusing a black clip.
+    The kind needs its own enum slot or the model has to force an empty shot
+    into `character_missing` — exactly what rule 4 now waves through."""
+    from shortform.visuals.critic import VERDICT_TOOL
+
+    kinds = VERDICT_TOOL["input_schema"]["properties"]["issues"]["items"][
+        "properties"
+    ]["kind"]["enum"]
+    assert "blank_frames" in kinds
+
+
+def test_blank_frames_verdict_is_fatal():
+    v = _verdict_from({
+        "issues": [{"kind": "blank_frames", "severity": FATAL,
+                    "detail": "all frames solid black"}],
+        "summary": "empty shot",
+    })
+    assert not v.passed

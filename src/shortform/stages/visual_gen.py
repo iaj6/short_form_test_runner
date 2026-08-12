@@ -210,6 +210,10 @@ class VisualGenStage:
                 reference_path=Path(reference_path),
                 work_dir=work_dir,
                 expected_characters=expected_characters,
+                # Without this the critic scores a scripted exit as the model
+                # having lost the character, and burns the whole ladder below
+                # regenerating a shot that was doing what the script asked.
+                intended_action=segment.staged_action,
             )
             reviews.append(
                 {
