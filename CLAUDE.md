@@ -148,6 +148,8 @@ After each clip is generated, frames are sampled and sent to Claude alongside th
 
 **Chained clips are judged against the segment's hero, not the frame they chained from** — otherwise a drifting clip gets compared against the drift and passes.
 
+**A flagged clip is recorded so a resume regenerates it** (`.flagged_clips` in the working directory, one filename per line). Reuse checks that a clip is *readable*, not that it is *correct*, and a clip that fails every attempt is deliberately kept — so without this record a resume adopts a clip the critic already condemned, and since reused clips are never re-reviewed, nothing ever looks at it again. The record is per clip rather than per directory: one bad clip must not discard every clip the run already paid for. A clip that passes on a later run is removed from the record, so it doesn't outlive the problem and bill for a regenerate every run thereafter; and clearing a directory's visuals clears the record with them, since it names files that no longer exist.
+
 **It can never block a render.** Missing key, network error, refusal, malformed response — all degrade to a passing verdict marked `unverified`, reported separately at the end so "never checked" can't be mistaken for "checked and fine". A critic that crashes a batch is worse than no critic.
 
 **Bias toward passing.** A false positive costs one extra clip; a false negative costs a broken episode. But a critic that flags everything burns the budget and trains you to ignore it, so the prompt says explicitly: flag clear failures, and when uncertain, pass.

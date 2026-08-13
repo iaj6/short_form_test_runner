@@ -46,6 +46,12 @@ CRITIC_MAX_ATTEMPTS = 3
 # it. Cheap file, expensive absence.
 PROVENANCE_FILE = ".visual_backend"
 
+# Clips the critic rejected on every attempt and which were kept anyway. Reuse
+# checks readability, not correctness, so without this record a resume adopts a
+# clip the critic already condemned — and the episode ships with it, since a
+# reused clip is never re-reviewed. One line per clip filename.
+FLAGGED_FILE = ".flagged_clips"
+
 
 class VisualGenStage:
     def __init__(
@@ -67,6 +73,8 @@ class VisualGenStage:
         self._reuse_existing = reuse_existing
         # Set per run in execute(), once the working directory is known.
         self._reuse_this_run = False
+        self._run_dir: Path | None = None
+        self._flagged: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -113,6 +121,26 @@ class VisualGenStage:
         # Fresh directory: nothing to conflict with, and nothing to reuse.
         return True
 
+    def _load_flagged(self, video_dir: Path) -> set[str]:
+        marker = video_dir / FLAGGED_FILE
+        if not marker.exists():
+            return set()
+        return {line.strip() for line in marker.read_text().splitlines() if line.strip()}
+
+    def _save_flagged(self) -> None:
+        """Persist the flagged set, if this stage is running against a directory.
+
+        A no-op when `_run_dir` is unset, which is how the unit tests drive
+        `_generate_reviewed` directly — the set still tracks in memory.
+        """
+        if self._run_dir is None:
+            return
+        marker = self._run_dir / FLAGGED_FILE
+        if not self._flagged:
+            marker.unlink(missing_ok=True)
+            return
+        marker.write_text("\n".join(sorted(self._flagged)) + "\n")
+
     def _clear_stale_visuals(self, video_dir: Path) -> None:
         """Delete visual artifacts this run has decided not to reuse.
 
@@ -140,6 +168,10 @@ class VisualGenStage:
             return
         for path in stale:
             path.unlink()
+        # The flagged record named those files. Keeping it would carry verdicts
+        # forward onto whatever regenerates into the same filenames.
+        self._flagged.clear()
+        (video_dir / FLAGGED_FILE).unlink(missing_ok=True)
         logger.info(
             "Cleared %d stale visual artifact(s) from %s so a later run cannot "
             "mistake them for '%s' output",
@@ -170,6 +202,13 @@ class VisualGenStage:
         ):
             path = output_stem.with_suffix(suffix)
             if not path.exists() or path.stat().st_size == 0:
+                continue
+            if path.name in self._flagged:
+                logger.warning(
+                    "Existing clip %s failed continuity on its last run — "
+                    "regenerating rather than reusing it",
+                    path.name,
+                )
                 continue
             if out_type == VisualOutputType.VIDEO and _probe_duration(path) <= 0:
                 logger.warning(
@@ -263,6 +302,12 @@ class VisualGenStage:
                     logger.warning("%s: NOT VERIFIED — %s", label, verdict.summary)
                 else:
                     logger.info("%s: critic ok — %s", label, verdict.summary)
+                # A clip that now passes is no longer flagged. Without this the
+                # record outlives the problem and every future run regenerates a
+                # clip that has already been fixed.
+                if result.path.name in self._flagged:
+                    self._flagged.discard(result.path.name)
+                    self._save_flagged()
                 return result
 
             logger.warning(
@@ -284,6 +329,10 @@ class VisualGenStage:
             label, CRITIC_MAX_ATTEMPTS,
             verdict.describe() if verdict else "unknown",
         )
+        # Record it so a resume regenerates rather than adopting it. Reuse never
+        # re-reviews, so an inherited flagged clip is never looked at again.
+        self._flagged.add(attempts[-1].path.name)
+        self._save_flagged()
         return attempts[-1]
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
@@ -322,6 +371,13 @@ class VisualGenStage:
 
         # Provenance gates clip reuse for the whole run, so decide once.
         run_dir = file_store.video_dir(ctx.video.id)
+        self._run_dir = run_dir
+        self._flagged = self._load_flagged(run_dir)
+        if self._flagged:
+            logger.info(
+                "%d clip(s) flagged by a previous run will be regenerated: %s",
+                len(self._flagged), ", ".join(sorted(self._flagged)),
+            )
         self._reuse_this_run = self._reuse_allowed(run_dir)
         if not self._reuse_this_run:
             # Clear before stamping. Anything left behind would sit in a

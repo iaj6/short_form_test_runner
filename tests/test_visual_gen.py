@@ -354,3 +354,86 @@ def test_the_e03_sequence_cannot_leave_reusable_leftovers(tmp_path: Path):
     assert not (tmp_path / "segment_02.mp4").exists()
     # And the audio survived both runs.
     assert (tmp_path / "segment_02.mp3").exists()
+
+
+# --- Flagged clips are not reused -------------------------------------------
+#
+# Reuse checks that a clip is readable, not that it is correct. A clip the
+# critic condemned on every attempt is kept (a flagged clip beats a failed
+# render), so without a record of that verdict a resume adopts it — and reused
+# clips are never re-reviewed, so nothing looks at it again. Ubu Rex e03's
+# black-frame clip had to be deleted by hand for exactly this reason.
+
+
+def test_flagged_clip_is_not_reused(tmp_path: Path):
+    from shortform.stages.visual_gen import FLAGGED_FILE
+
+    (tmp_path / FLAGGED_FILE).write_text("segment_01.mp4\n")
+    _real_mp4(tmp_path / "segment_01.mp4")
+
+    stage = _stage_for("veo")
+    stage._flagged = stage._load_flagged(tmp_path)
+    stage._reuse_this_run = True
+    assert stage._cached(tmp_path / "segment_01", 1080, 1920) is None
+
+
+def test_unflagged_clip_beside_a_flagged_one_is_still_reused(tmp_path: Path):
+    """The record is per clip, not per directory — one bad clip must not throw
+    away every clip the run already paid for."""
+    from shortform.stages.visual_gen import FLAGGED_FILE
+
+    (tmp_path / FLAGGED_FILE).write_text("segment_01.mp4\n")
+    _real_mp4(tmp_path / "segment_00.mp4")
+
+    stage = _stage_for("veo")
+    stage._flagged = stage._load_flagged(tmp_path)
+    stage._reuse_this_run = True
+    assert stage._cached(tmp_path / "segment_00", 1080, 1920) is not None
+
+
+def test_flagged_record_round_trips(tmp_path: Path):
+    from shortform.stages.visual_gen import FLAGGED_FILE
+
+    stage = _stage_for("veo")
+    stage._run_dir = tmp_path
+    stage._flagged = {"segment_01.mp4", "segment_01_clip_01.mp4"}
+    stage._save_flagged()
+
+    assert (tmp_path / FLAGGED_FILE).exists()
+    assert _stage_for("veo")._load_flagged(tmp_path) == stage._flagged
+
+
+def test_emptying_the_record_removes_the_file(tmp_path: Path):
+    """A stale marker naming nothing would make every run log a flagged clip
+    that no longer exists."""
+    from shortform.stages.visual_gen import FLAGGED_FILE
+
+    stage = _stage_for("veo")
+    stage._run_dir = tmp_path
+    stage._flagged = {"segment_01.mp4"}
+    stage._save_flagged()
+
+    stage._flagged.clear()
+    stage._save_flagged()
+    assert not (tmp_path / FLAGGED_FILE).exists()
+
+
+def test_missing_record_is_an_empty_set(tmp_path: Path):
+    assert _stage_for("veo")._load_flagged(tmp_path) == set()
+
+
+def test_clearing_stale_visuals_drops_the_flagged_record(tmp_path: Path):
+    """The record names files that no longer exist; carrying it forward would
+    apply old verdicts to whatever regenerates into the same names."""
+    from shortform.stages.visual_gen import FLAGGED_FILE
+
+    (tmp_path / "segment_01.mp4").write_bytes(b"clip")
+    (tmp_path / FLAGGED_FILE).write_text("segment_01.mp4\n")
+
+    stage = _stage_for("veo")
+    stage._run_dir = tmp_path
+    stage._flagged = stage._load_flagged(tmp_path)
+    stage._clear_stale_visuals(tmp_path)
+
+    assert stage._flagged == set()
+    assert not (tmp_path / FLAGGED_FILE).exists()

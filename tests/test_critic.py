@@ -463,3 +463,60 @@ def test_blank_frames_verdict_is_fatal():
         "summary": "empty shot",
     })
     assert not v.passed
+
+
+# --- The flagged record's lifecycle -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exhausting_the_ladder_records_the_clip(tmp_path: Path):
+    from shortform.stages.visual_gen import VisualGenStage
+
+    stage = VisualGenStage(
+        backend=_FakeBackend(tmp_path), critic=_ScriptedCritic(failures=99)
+    )
+    result = await stage._generate_reviewed(
+        segment=_segment(), output_path=tmp_path / "seg", width=1080, height=1920,
+        config={"reference_image": "ref.png"}, label="test",
+        reference_path="ref.png", work_dir=tmp_path, expected_characters="",
+        reviews=[],
+    )
+    assert stage._flagged == {result.path.name}
+
+
+@pytest.mark.asyncio
+async def test_a_clip_that_now_passes_is_unflagged(tmp_path: Path):
+    """Otherwise the record outlives the problem and every later run pays to
+    regenerate a clip that has already been fixed."""
+    from shortform.stages.visual_gen import VisualGenStage
+
+    stage = VisualGenStage(
+        backend=_FakeBackend(tmp_path), critic=_ScriptedCritic(failures=0)
+    )
+    stage._flagged = {"seg.mp4"}
+    result = await stage._generate_reviewed(
+        segment=_segment(), output_path=tmp_path / "seg", width=1080, height=1920,
+        config={"reference_image": "ref.png"}, label="test",
+        reference_path="ref.png", work_dir=tmp_path, expected_characters="",
+        reviews=[],
+    )
+    assert result.path.name == "seg.mp4"
+    assert stage._flagged == set()
+
+
+@pytest.mark.asyncio
+async def test_a_clip_passing_only_on_retry_is_not_flagged(tmp_path: Path):
+    """The ladder existing to fix things is the point — a clip that needed two
+    attempts and then passed is a success, not something to regenerate later."""
+    from shortform.stages.visual_gen import VisualGenStage
+
+    stage = VisualGenStage(
+        backend=_FakeBackend(tmp_path), critic=_ScriptedCritic(failures=1)
+    )
+    await stage._generate_reviewed(
+        segment=_segment(), output_path=tmp_path / "seg", width=1080, height=1920,
+        config={"reference_image": "ref.png"}, label="test",
+        reference_path="ref.png", work_dir=tmp_path, expected_characters="",
+        reviews=[],
+    )
+    assert stage._flagged == set()
