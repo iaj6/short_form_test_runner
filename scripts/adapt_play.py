@@ -66,6 +66,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from shortform.config import load_strategy  # noqa: E402
+from shortform.stages.visual_gen import CLIP_TARGET_SECONDS  # noqa: E402
 from shortform.models.script import Script, Segment, Turn  # noqa: E402
 from shortform.tts.cast import (  # noqa: E402
     DEFAULT_STAGE_DIRECTION_GAP,
@@ -110,6 +111,26 @@ LONG_SEGMENT_WARN = 30.0
 # distance penalty maxes near 0.5 unweighted, so without this a marked beat would
 # win at ANY legal duration and the target would be decorative.
 TARGET_WEIGHT = 2.0
+
+# How many chained Veo clips a segment may need. Derived from the real clip
+# length rather than guessed, so the two can't drift apart.
+#
+# This is a QUALITY ceiling, not just a cost one. A segment is covered by
+# ceil(duration / CLIP_TARGET_SECONDS) clips, and only clip 0 is anchored to the
+# hero — every later clip chains from the previous clip's LAST FRAME, so each
+# hop is a fresh generation of character drift compounding on the last. At the
+# old 22s target a segment ran to 3-4 clips, i.e. 2-3 generations of drift, and
+# Ubu Rex e03 showed what that looks like: a costumed puppet arriving at the
+# final clip nude, recoloured, and mid-tantrum. Two clips means one hop.
+#
+# The soft break fires once the running total REACHES the target, so a segment
+# can overshoot by its last speech — the margin keeps that overshoot from
+# buying a third clip.
+MAX_CLIPS_PER_SEGMENT = 2
+SEGMENT_OVERSHOOT_MARGIN = 2.0
+DEFAULT_SEGMENT_TARGET = (
+    MAX_CLIPS_PER_SEGMENT * CLIP_TARGET_SECONDS - SEGMENT_OVERSHOOT_MARGIN
+)
 
 # Boundary desirability. Scored against distance-from-target, so a slightly
 # short episode ending on a scene change beats a perfectly-sized one that cuts
@@ -412,7 +433,14 @@ def main() -> int:
     ap.add_argument("--target", type=float, default=70.0, help="target episode seconds")
     ap.add_argument("--min", dest="min_s", type=float, default=45.0)
     ap.add_argument("--max", dest="max_s", type=float, default=85.0)
-    ap.add_argument("--segment-target", type=float, default=22.0)
+    ap.add_argument(
+        "--segment-target", type=float, default=DEFAULT_SEGMENT_TARGET,
+        help=(
+            f"Seconds of audio per visual beat (default {DEFAULT_SEGMENT_TARGET:.0f}s "
+            f"= {MAX_CLIPS_PER_SEGMENT} chained Veo clips). Raising it buys longer "
+            "unbroken shots at the cost of more chained drift."
+        ),
+    )
     ap.add_argument("--start-episode", type=int, default=1)
     ap.add_argument("--dry-run", action="store_true", help="report without writing")
     args = ap.parse_args()

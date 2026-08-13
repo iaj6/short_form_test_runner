@@ -73,7 +73,11 @@ entire point of the shot.
 
 Report ONLY these, as `fatal`:
 - A character in the reference has been REPLACED by a visibly different \
-character (different face, different hair, different clothing).
+character (different face, different hair, different clothing). Losing a \
+garment counts: if a character is dressed in the reference and bare, or wearing \
+something else, in the frames, that is `character_replaced` — not degradation, \
+not drift, however smoothly it happens. So does a hat, hood, or hairstyle \
+changing shape or colour, and a moustache or beard appearing or disappearing.
 - A character present in the reference is MISSING from the frames entirely, or \
 has drifted so far out of frame they are effectively gone.
 - Characters have SWAPPED positions relative to the reference (the one on the \
@@ -84,7 +88,10 @@ left is now on the right).
 subject and setting. Report this as `blank_frames`.
 
 Report these as `minor` (informational; they will not trigger a regenerate):
-- Texture, sharpness, or color degradation relative to the reference.
+- Texture, sharpness, or color degradation relative to the reference. This \
+covers the SURFACE of a character, never their costume: "the clay looks softer" \
+is minor, "he is no longer wearing the suit" is not. If you find yourself \
+describing a costume change as drift or degradation, it is `character_replaced`.
 - Set dressing that appeared or vanished (props, background details).
 - Noticeable camera movement when the shot was meant to be locked off.
 
@@ -103,7 +110,10 @@ action says a character leaves, exits, goes out, or is sent away, their absence 
 later in the shot is the shot working — do NOT report `character_missing`. \
 Likewise, a door, window, or piece of set the action requires is not a \
 `new_character` or an unexplained change. A character the action does not \
-mention should still be present throughout.
+mention should still be present throughout. The action excuses WHERE a \
+character is and WHAT IS ON THE SET. It never excuses who they are or what they \
+are wearing: an exit does not explain a costume change, and you must not cite \
+the action when reporting one.
 5. Rule 4 never excuses an empty shot. "The character exited" explains one \
 character leaving frame; it does not explain black or empty frames, a vanished \
 setting, or every character disappearing at once. Report those as `blank_frames` \

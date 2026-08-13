@@ -408,7 +408,36 @@ def test_review_forwards_the_intended_action(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stage_hands_the_critic_the_scripted_action(tmp_path: Path):
-    """THE fix: the exit reaches the critic instead of being invisible to it."""
+    """The exit reaches the critic instead of being invisible to it.
+
+    The action is now passed in per clip rather than derived from the whole
+    segment — see `build_staged_action`, which decides WHICH clip gets it.
+    Deriving it here is what let one exit be expected in all four of a
+    segment's clips.
+    """
+    from shortform.stages.visual_gen import VisualGenStage
+
+    seg = Segment(
+        index=1, visual_prompt="x",
+        turns=[Turn(speaker="PERE UBU", line="Off I go.",
+                    stage_direction="going out, slamming the door")],
+    )
+    critic = _ScriptedCritic(failures=0)
+    stage = VisualGenStage(backend=_FakeBackend(tmp_path), critic=critic)
+
+    await stage._generate_reviewed(
+        segment=seg, output_path=tmp_path / "seg", width=1080, height=1920,
+        config={"reference_image": "ref.png"}, label="test",
+        reference_path="ref.png", work_dir=tmp_path, expected_characters="",
+        reviews=[], intended_action="PERE UBU going out, slamming the door",
+    )
+    assert critic.seen_actions == ["PERE UBU going out, slamming the door"]
+
+
+@pytest.mark.asyncio
+async def test_a_clip_given_no_action_tells_the_critic_nothing(tmp_path: Path):
+    """A clip that covers no annotated turn goes back to strict comparison —
+    it must not inherit an exit it isn't supposed to be performing."""
     from shortform.stages.visual_gen import VisualGenStage
 
     seg = Segment(
@@ -425,7 +454,7 @@ async def test_stage_hands_the_critic_the_scripted_action(tmp_path: Path):
         reference_path="ref.png", work_dir=tmp_path, expected_characters="",
         reviews=[],
     )
-    assert critic.seen_actions == ["PERE UBU going out, slamming the door"]
+    assert critic.seen_actions == [""]
 
 
 @pytest.mark.asyncio
