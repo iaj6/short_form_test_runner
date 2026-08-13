@@ -114,7 +114,13 @@ mention should still be present throughout. The action excuses WHERE a \
 character is and WHAT IS ON THE SET. It never excuses who they are or what they \
 are wearing: an exit does not explain a costume change, and you must not cite \
 the action when reporting one.
-5. Rule 4 never excuses an empty shot. "The character exited" explains one \
+5. Fill in `character_check` for EVERY character you were told to expect, \
+before you decide anything else. A character who is leaving, turning away, \
+partly behind a door, or otherwise doing what the action asks is still to be \
+checked — those are the ones most likely to have gone wrong, precisely because \
+the action gives you a reason not to look. "He is exiting" is not an answer to \
+"is he still wearing his clothes".
+6. Rule 4 never excuses an empty shot. "The character exited" explains one \
 character leaving frame; it does not explain black or empty frames, a vanished \
 setting, or every character disappearing at once. Report those as `blank_frames` \
 or `setting_changed` no matter what the intended action says.
@@ -164,12 +170,48 @@ VERDICT_TOOL: dict[str, Any] = {
                     "required": ["kind", "severity", "detail"],
                 },
             },
+            "character_check": {
+                "type": "array",
+                "description": (
+                    "One entry for EVERY character you were told should be "
+                    "present. Required. Do not omit a character because they "
+                    "are exiting, leaving, partly occluded, in motion, or "
+                    "otherwise explained by the intended action — those are "
+                    "exactly the characters most likely to be wrong."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "character": {
+                            "type": "string",
+                            "description": "Who this entry is about.",
+                        },
+                        "costume_matches": {
+                            "type": "boolean",
+                            "description": (
+                                "True only if this character wears the same "
+                                "garments, headwear and facial hair as in the "
+                                "reference. False if anything is missing, "
+                                "added, or a different shape or colour — "
+                                "including a character who is bare in the "
+                                "frames but dressed in the reference. Judge "
+                                "the costume, not the render quality."
+                            ),
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "One sentence on what you saw.",
+                        },
+                    },
+                    "required": ["character", "costume_matches", "note"],
+                },
+            },
             "summary": {
                 "type": "string",
                 "description": "One short sentence describing the shot overall.",
             },
         },
-        "required": ["issues", "summary"],
+        "required": ["issues", "character_check", "summary"],
     },
 }
 
@@ -370,11 +412,45 @@ def _verdict_from(payload: dict[str, Any]) -> Verdict:
         )
         for raw in payload.get("issues") or []
     ]
+    issues.extend(_costume_failures(payload))
     return Verdict(
         passed=not any(i.is_fatal for i in issues),
         issues=issues,
         summary=str(payload.get("summary", "")),
     )
+
+
+def _costume_failures(payload: dict[str, Any]) -> list[Issue]:
+    """Fatal issues for any character the critic itself judged mis-costumed.
+
+    This is what makes `character_check` load-bearing rather than decorative.
+    Two prompt-only attempts to hold this boundary failed under real conditions:
+    told a character was performing a scripted exit, the critic stopped
+    evaluating that character and wrote a summary about everyone else. Ubu Rex
+    e03 passed a clip in which Pere Ubu had become a smooth nude featureless
+    pear — no moustache, no sleeves, no trousers — with the verdict "Pere Ubu
+    exits through the door as scripted while the woman ... remains consistent".
+
+    A required schema field can't be skipped the way a clause in prose can. And
+    converting it here, rather than trusting the model to also file an issue,
+    means a `costume_matches: false` fails the clip even when the issues list
+    came back empty — the model has to actively assert the costume is fine, not
+    merely neglect to mention that it isn't.
+    """
+    failures: list[Issue] = []
+    for raw in payload.get("character_check") or []:
+        if not isinstance(raw, dict) or raw.get("costume_matches") is not False:
+            continue
+        who = str(raw.get("character", "a character"))
+        note = str(raw.get("note", "")).strip()
+        failures.append(
+            Issue(
+                kind="character_replaced",
+                severity=FATAL,
+                detail=f"{who}: {note}" if note else f"{who} is not correctly costumed",
+            )
+        )
+    return failures
 
 
 # Magic bytes -> media type. A file's extension is not evidence of its format:

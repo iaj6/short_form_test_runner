@@ -812,6 +812,18 @@ def _build_variant_resolver(strategy_visuals: dict[str, Any]):
         candidate_key = variant_key or default_key
         if candidate_key and candidate_key in variants_by_key and manifest_dir:
             return str(manifest_dir / variants_by_key[candidate_key])
+        if candidate_key and variants_by_key:
+            # Falling back is right — a render beats no render — but doing it
+            # silently is not. The fallback is usually a DIFFERENT CAST than the
+            # segment asked for (a solo segment anchored to a two-hander), so
+            # the critic then reports the absent character as missing on every
+            # clip and the ladder burns itself out on an unfixable mismatch.
+            logger.warning(
+                "Segment asked for variant '%s', which the manifest doesn't "
+                "define — falling back to %s. Generate the variant if this "
+                "segment's cast differs from the fallback's.",
+                candidate_key, Path(fallback_ref).name or "(none)",
+            )
         # Fall back to the strategy's singular reference_image (legacy path)
         return fallback_ref
 
