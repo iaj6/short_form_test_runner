@@ -10,7 +10,7 @@ Linear stages with SQLite checkpointing. `resume_from="<stage_name>"` skips up t
 
 ```
 ScriptGenStage → VariantSelectionStage → TTSStage         → VisualGenStage          → AssemblyStage
-   (Claude)        (Claude — optional)     (Edge / F5-TTS)    (Pillow / Veo,             (FFmpeg)
+   (Claude)        (Claude — optional)   (Edge / F5 / 11Labs) (Pillow / Veo,             (FFmpeg)
                                                                 multi-clip + chained)
 ```
 
@@ -22,7 +22,7 @@ Key files:
 - `src/shortform/pipeline/runner.py` — orchestration, checkpointing, `resume_from` skip semantics.
 - `src/shortform/stages/` — one module per stage.
 - `src/shortform/stages/variant_select.py` — picks per-segment hero variant from a manifest via Claude tool-use; no-op when the strategy doesn't declare `visuals.variants_manifest`.
-- `src/shortform/tts/` — pluggable TTS backends (Edge, F5-TTS); strategy picks via `tts.backend`.
+- `src/shortform/tts/` — pluggable TTS backends (Edge, F5-TTS, ElevenLabs); strategy picks via `tts.backend`.
 - `src/shortform/visuals/` — pluggable visual backends (Pillow, Veo). Veo defaults to `veo-3.1-generate-preview`.
 - `src/shortform/stages/assembly.py` — FFmpeg-heavy. Per-input timebase+framerate normalization before xfade, multi-clip concat per segment, sidechain music ducking, Ken Burns on stills, animated subtitles.
 - `config/strategies/*.yaml` — strategy overlays.
@@ -35,7 +35,7 @@ A strategy is one YAML file in `config/strategies/`. It overlays `config/default
 - `content` — tone, style, target duration, segment count, default voice.
 - `prompts.system` + `prompts.template` — drive script generation. Few-shot examples go here.
 - `topics` — random sample pool unless `--topic` is passed.
-- `tts.backend` + backend-specific params — `edge` (voice/rate/volume) or `f5_tts` (ref_audio, ref_text, model, speed, cfg_strength).
+- `tts.backend` + backend-specific params — `edge` (voice/rate/volume), `f5_tts` (ref_audio, ref_text, model, speed, cfg_strength), or `elevenlabs` (voice_id, model_id, output_format, plus the voice settings stability / similarity_boost / style / use_speaker_boost / speed).
 - `visuals` — backend-tunable params + `variants_manifest` if the strategy ships a hero-variant library.
 - `music` — directory under `data/music/` to randomly pick background tracks from.
 
@@ -89,7 +89,7 @@ Speaker keys are normalized (`normalize_speaker`), so an adaptation can emit `P�
 
 **Concatenation** (`src/shortform/tts/concat.py`). Mixed backends mean heterogeneous inputs (F5 emits 24kHz mono, Edge its own MP3 profile), which rules out ffmpeg's concat *demuxer* — it requires identical codec parameters and mangles mismatched ones. Uses the concat *filter* with per-input `aresample`/`aformat` normalization, the same lesson `assembly.py` already encodes for video xfade chains. Output matches `f5_backend._wav_to_mp3`'s profile, so **a multi-voice segment is indistinguishable from a single-voice one downstream** — assembly reads `seg.audio_path` and nothing else, which is why none of its 945 lines needed to change.
 
-**Caption timings** are merged from per-turn timings with each turn's offset applied, but **all-or-nothing**: if any turn's backend emitted none (F5-TTS never does), the merge returns empty and the caller falls back to Whisper over the whole joined file. Partial timings would caption only the Edge-voiced lines and silently drop the cloned ones — worse than no captions, because it looks like it worked.
+**Caption timings** are merged from per-turn timings with each turn's offset applied, but **all-or-nothing**: if any turn's backend emitted none (F5-TTS never does), the merge returns empty and the caller falls back to Whisper over the whole joined file. Partial timings would caption only the Edge-voiced lines and silently drop the cloned ones — worse than no captions, because it looks like it worked. Note the corollary for mixed casts: one F5 turn in an otherwise-ElevenLabs segment discards that segment's exact alignment and sends the whole thing through ASR.
 
 ## Batch runner (`pipeline/batch.py`, `shortform batch`)
 
@@ -176,8 +176,29 @@ Tradeoff: clips 2+ within a segment lose the hero-anchor since they chain from t
 - **Veo 429 credits-depleted (fail-fast variant)** — sniffs the error message for "credits"/"depleted"/"billing" and skips retry. Added after a 30s × 4 backoff wasted 7.5 minutes retrying a non-retryable balance issue.
 - **Veo safety-filter rejection retry** (in `VeoBackend.generate`) — 2 attempts. Veo's safety filter is statistical; same input often succeeds on retry. Added after gothic-vignette runs had multiple segments fall back to Pillow stills.
 - **F5-TTS subprocess retry** (`SUBPROCESS_MAX_ATTEMPTS = 2` in f5_backend.py) — handles SIGSEGV-at-MPS-load (exit -11), a known PyTorch-on-Apple-Silicon transient.
+- **ElevenLabs rate-limit + 5xx retry** (`MAX_ATTEMPTS = 3`, 2s base backoff in elevenlabs_backend.py) — auth and permission errors are deliberately NOT retried; a key missing the `text_to_speech` scope will never succeed, and retrying only buries a clear error message under a delay.
 
 ffmpeg gotchas baked into `assembly.py`: per-input normalization before xfade chains via `settb=AVTB,setpts=PTS-STARTPTS,fps=N,scale=W:H,format=PIXFMT` (video) and `asettb=AVTB,asetpts=PTS-STARTPTS,aresample=R` (audio). Veo's outputs vary in timebase (1/12288 vs 1/15360 seen) and framerate (24 vs 25 fps seen) across calls; both trip xfade without normalization.
+
+## ElevenLabs backend (`tts/elevenlabs_backend.py`)
+
+Hosted, expressive, character-capable voices. Needs `ELEVENLABS_API_KEY`.
+
+**Why it exists alongside F5-TTS**, given that "local F5-TTS over hosted ElevenLabs" is listed below as a settled decision. For *narration* that decision still holds: one voice, unbounded volume, and per-character billing is the enemy. An adapted stage play inverts both premises — it needs ~20 distinct character voices, and its total volume is bounded (a full play is on the order of 85k characters of speech). Recording a reference clip per character doesn't scale, and Edge's catalogue is uniformly "friendly, positive" with no grotesques in it. So dialogue strategies use ElevenLabs; single-narrator strategies like Bartholomew keep F5.
+
+**Captions come free and exact.** It calls `/with-timestamps` rather than plain synthesis, which returns character-level alignment alongside the audio; that folds into word timings directly. No Whisper pass — faster than the F5 path *and* more accurate, since it's real alignment rather than ASR guessing at what was said. This is the one backend where captions can't drift from the script.
+
+**Config is per speaker, and `voice_id` is required** — there's no sensible default, so a missing one is a hard error rather than a silent fallback to some arbitrary voice. `model_id` defaults to `eleven_multilingual_v2`. `output_format` defaults to `mp3_44100_128`, matching the final master's sample rate so nothing downsamples the hosted audio on its way through concat and assembly. Voice settings (`stability`, `similarity_boost`, `style`, `use_speaker_boost`, `speed`) are forwarded only when set; anything else in the merged config belongs to another backend and is ignored, which is what lets one `VoiceCast` carry F5 and ElevenLabs entries side by side.
+
+```yaml
+tts:
+  backend: "elevenlabs"
+  voices:
+    pere_ubu: { voice_id: "N2lVS1w4EtoT3dr4eOWO", stability: 0.35 }
+    mere_ubu: { voice_id: "pFZP5JQG7iQjIQuC4Bku" }
+```
+
+Pronunciation dictionaries are supported via `pronunciation_dictionary_id` + `pronunciation_dictionary_version_id` (both required together).
 
 ## F5-TTS setup notes
 
@@ -197,7 +218,7 @@ Attempted (HunyuanVideo I2V on a 32GB Apple Silicon machine) and shelved. The mo
 
 ## Data NOT in the repo (.gitignored, recreate locally)
 
-- `.env` — API keys. `ANTHROPIC_API_KEY` is required; `GOOGLE_GEMINI_API_KEY` is required for Veo and for variant generation.
+- `.env` — API keys. `ANTHROPIC_API_KEY` is required; `GOOGLE_GEMINI_API_KEY` is required for Veo and for variant generation; `ELEVENLABS_API_KEY` is required for strategies using the `elevenlabs` TTS backend.
 - `data/videos/` — generated output.
 - `data/assets/` — per-segment frames + intermediate audio. Regenerates.
 - `data/music/<category>/` — royalty-free tracks (large, licensed per-source).
@@ -219,7 +240,7 @@ These are real next-step ideas, not commitments. None block current functionalit
 ## Key decisions already made (don't re-debate without new info)
 
 - **Python, not TypeScript** — better ML/video ecosystem.
-- **Local F5-TTS over hosted ElevenLabs** — free, high quality, no character limits.
+- **Local F5-TTS over hosted ElevenLabs, for narration** — free, high quality, no character limits. Revisited for multi-speaker dialogue, which inverts the premises: a play needs ~20 character voices and its total volume is bounded, so cloning per character doesn't scale and per-character billing stops being the enemy. Both backends ship; the choice is per strategy, and a single `VoiceCast` can mix them. See the ElevenLabs section above.
 - **Veo image-to-video, not text-to-video** — stronger consistency, the reference-image anchor extends naturally to the variant system.
 - **Linear stages with SQLite checkpointing** — solid; improvements happen at the *content* layer, not the orchestration layer.
 - **Claude for script generation, not Gemini** — quality difference matters for tone-sensitive writing.
