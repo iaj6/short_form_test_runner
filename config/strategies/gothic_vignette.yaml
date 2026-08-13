@@ -116,10 +116,21 @@ topics:
   - "the heat death of the universe, considered before bed"
 
 music:
-  category: "gothic"  # NEW category — sourcing pending. Melancholic ambient, music-box, distant strings, clockwork.
+  category: "gothic"
   volume: 0.18
-  duck_threshold: 0.015
-  duck_ratio: 9.0
+
+  # Mood tags matched against data/music/gothic/tracks.yaml. Scoring is a
+  # preference rather than a filter, so an unmatched request still returns the
+  # closest track. Selection is seeded on the script id, so re-rendering an
+  # episode keeps the music it already had.
+  mood: ["victorian", "gothic", "melancholic"]
+  tempo: "slow"
+  intensity: "low"
+
+  # Sidechain ducking. These were previously ignored — assembly hardcoded
+  # threshold=0.02 / ratio=5, so the tuning here never took effect.
+  duck_threshold: 0.015   # lower than default = ducks for quieter narration
+  duck_ratio: 9.0         # higher than default = pushes the bed further down
 
 visuals:
   backend: veo  # flagship uses Veo image-to-video; without this the CLI default

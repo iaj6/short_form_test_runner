@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import random
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -13,11 +12,20 @@ from PIL import Image, ImageDraw, ImageFont
 from shortform.config import PROJECT_ROOT, MusicConfig
 from shortform.models.script import Segment, WordTiming
 from shortform.models.video import VideoStatus
+from shortform.music.selector import MusicRequest, Track, select_track
 from shortform.pipeline.context import PipelineContext
 from shortform.store.file_store import FileStore
 from shortform.visuals.backend import VisualOutputType
 
 logger = logging.getLogger(__name__)
+
+# Sidechain ducking defaults, overridable per strategy via music.duck_threshold
+# / music.duck_ratio. threshold is the narration level at which the music
+# starts being pushed down; ratio is how hard. These were previously
+# hardcoded into the filtergraph, so the values tuned in gothic_vignette.yaml
+# had never actually taken effect.
+DEFAULT_DUCK_THRESHOLD = 0.02
+DEFAULT_DUCK_RATIO = 5.0
 
 
 class AssemblyStage:
@@ -183,7 +191,13 @@ class AssemblyStage:
 
         # Step 3: Mix background music (if configured and tracks available)
         if has_music:
-            music_track = _pick_music_track(music_cfg, music_category)
+            music_track = _pick_music_track(
+                music_cfg,
+                music_category,
+                strategy_music=ctx.strategy.music,
+                seed=ctx.script.id or ctx.video.id,
+                episode_mood=ctx.script.music_mood,
+            )
             if music_track:
                 strategy_volume = ctx.strategy.music.get("volume")
                 strategy_duck = ctx.strategy.music.get("duck_volume")
@@ -195,7 +209,7 @@ class AssemblyStage:
                 )
                 _mix_background_music(
                     video_path=assembled_path,
-                    music_path=music_track,
+                    music_path=music_track.path,
                     output_path=output_path,
                     music_volume=music_volume,
                     duck_volume=duck_volume,
@@ -203,8 +217,19 @@ class AssemblyStage:
                     fade_out=music_cfg.fade_out,
                     audio_bitrate=vid_cfg.audio_bitrate,
                     audio_sample_rate=vid_cfg.audio_sample_rate,
+                    duck_threshold=float(
+                        ctx.strategy.music.get("duck_threshold", DEFAULT_DUCK_THRESHOLD)
+                    ),
+                    duck_ratio=float(
+                        ctx.strategy.music.get("duck_ratio", DEFAULT_DUCK_RATIO)
+                    ),
                 )
-                logger.info("Mixed background music: %s", music_track.name)
+                logger.info("Mixed background music: %s", music_track.path.name)
+                # Surface attribution so publishing can build a description
+                # without re-reading the manifest.
+                if music_track.credit:
+                    ctx.artifacts["music_credit"] = music_track.credit
+                    logger.info("Music attribution required: %s", music_track.credit)
             else:
                 logger.warning("No music tracks found in category '%s'", music_category)
                 if assembled_path != output_path:
@@ -870,13 +895,44 @@ def _probe_duration(path: Path) -> float:
         ) from e
 
 
-def _pick_music_track(music_cfg: MusicConfig, category: str) -> Path | None:
-    """Pick a random music track from the category directory."""
+def _pick_music_track(
+    music_cfg: MusicConfig,
+    category: str,
+    strategy_music: dict[str, Any] | None = None,
+    seed: str = "",
+    episode_mood: list[str] | None = None,
+) -> Track | None:
+    """Choose a track for this video from the category's curated manifest.
+
+    Falls back to a directory glob for categories without a `tracks.yaml`.
+    Selection is seeded on the script id rather than random, so re-rendering an
+    episode keeps the music it already had — with `random.choice`, a resumed
+    batch scored the same episode differently on every attempt.
+    """
     music_dir = PROJECT_ROOT / music_cfg.music_dir / category
     if not music_dir.exists():
         return None
-    tracks = list(music_dir.glob("*.mp3")) + list(music_dir.glob("*.wav"))
-    return random.choice(tracks) if tracks else None
+
+    strategy_music = strategy_music or {}
+    # Episode mood wins over the strategy default: the default is the series
+    # signature, the per-episode value is the scene's colour.
+    #
+    # When the episode declares its own mood it is a COMPLETE override — the
+    # strategy's tempo/intensity hints are dropped too. Those describe the
+    # default cue, and letting them survive means a series-wide preference
+    # silently breaks ties between scene-specific cues. (Observed: a scene
+    # tagged `closing` tied with `scheming` on mood, and a strategy-level
+    # `tempo: medium` handed it to scheming.)
+    if episode_mood:
+        request = MusicRequest(mood=episode_mood, seed=seed)
+    else:
+        request = MusicRequest(
+            mood=[str(m) for m in strategy_music.get("mood") or []],
+            tempo=str(strategy_music.get("tempo", "")),
+            intensity=str(strategy_music.get("intensity", "")),
+            seed=seed,
+        )
+    return select_track(music_dir, request)
 
 
 def _mix_background_music(
@@ -889,6 +945,8 @@ def _mix_background_music(
     fade_out: float,
     audio_bitrate: str,
     audio_sample_rate: int,
+    duck_threshold: float = DEFAULT_DUCK_THRESHOLD,
+    duck_ratio: float = DEFAULT_DUCK_RATIO,
 ) -> None:
     """Mix background music under the narration with volume ducking.
 
@@ -914,9 +972,12 @@ def _mix_background_music(
 
     # The narration is [0:a], music is [1:a]
     # sidechaincompress: music (source) is ducked by narration (sidechain)
-    # threshold=0.02 = duck when narration exceeds ~-34dB (catches all speech)
-    # ratio=5 = strong ducking
+    # threshold = narration level at which ducking engages (lower = more
+    #   sensitive, catches quieter speech)
+    # ratio = how hard the music is pushed down once engaged
     # attack/release = how fast ducking kicks in/releases
+    # Both are strategy-tunable: a dense score under a soft-spoken narrator
+    # needs a lower threshold and a higher ratio than a sparse one.
     filter_complex = (
         f"[1:a]aloop=loop=-1:size=2e+09,atrim=duration={video_duration:.3f},"
         f"volume={music_volume},"
@@ -924,7 +985,7 @@ def _mix_background_music(
         f"afade=t=out:st={fade_out_start:.3f}:d={fade_out}"
         f"[music];"
         f"[music][0:a]sidechaincompress="
-        f"threshold=0.02:ratio=5:attack=0.1:release=0.5:level_sc=1"
+        f"threshold={duck_threshold}:ratio={duck_ratio}:attack=0.1:release=0.5:level_sc=1"
         f"[ducked];"
         f"[0:a][ducked]amix=inputs=2:duration=first:weights=1 {duck_weight:.2f}"
         f"[aout]"

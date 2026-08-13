@@ -29,8 +29,20 @@ data/music/**/*.flac
 data/music/**/*.m4a
 data/music/**/*.ogg
 
-# Character refs: ignore the generated candidates pool, track the locked hero image(s)
-data/character_refs/candidates/
+# Character refs: ignore the generated candidates pool, track the locked hero image(s).
+# The ** form covers per-character subdirectories (data/character_refs/<name>/candidates/),
+# which are large pools of rejected generations and pure disposable output.
+data/character_refs/**/candidates/
+
+# Sound effects: ignore the generated audio, TRACK the library manifest so
+# the library stays reproducible from the repo (same split as music).
+data/sfx/*.mp3
+data/sfx/*.wav
+
+# Adapted play/script sources. Text you translate or adapt is content rather than
+# code, and depending on the source it may carry rights obligations — keep it
+# local and decide deliberately what to publish.
+data/plays/
 
 # Political-juxtaposition test item: downloaded source videos + extracted clip candidates
 data/moments/

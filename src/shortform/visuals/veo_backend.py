@@ -89,6 +89,7 @@ class VeoBackend:
         animation_prompt = _build_animation_prompt(
             segment.visual_prompt,
             config.get("animation_style", "cinematic slow push-in"),
+            config.get("speech_schedule", ""),
         )
 
         # Step 3: Call Veo image-to-video
@@ -211,15 +212,22 @@ async def _resolve_base_frame(
     return base.path
 
 
-def _build_animation_prompt(visual_prompt: str, animation_style: str) -> str:
-    """Convert a visual description into cinematography language for Veo."""
-    parts = []
-    if animation_style:
-        parts.append(animation_style)
-    if visual_prompt:
-        parts.append(visual_prompt)
+def _build_animation_prompt(
+    visual_prompt: str, animation_style: str, speech_schedule: str = ""
+) -> str:
+    """Convert a visual description into cinematography language for Veo.
+
+    `speech_schedule` (built by VisualGenStage for dialogue segments) is
+    appended as its own sentence rather than another comma-joined clause — it
+    is an instruction about timing, not another style descriptor, and burying
+    it in the descriptor list got it ignored.
+    """
+    parts = [p for p in (animation_style, visual_prompt) if p]
     parts.append("smooth motion, high quality")
-    return ", ".join(parts)
+    prompt = ", ".join(parts)
+    if speech_schedule:
+        prompt = f"{prompt}. {speech_schedule}"
+    return prompt
 
 
 async def _generate_video(

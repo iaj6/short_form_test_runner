@@ -8,9 +8,24 @@ from pathlib import Path
 
 import typer
 
-from shortform.config import PROJECT_ROOT, list_strategies, load_settings, load_strategy
+from shortform.config import (
+    PROJECT_ROOT,
+    AppSettings,
+    StrategyConfig,
+    list_strategies,
+    load_settings,
+    load_strategy,
+)
 from shortform.models.script import Script
 from shortform.models.video import Video
+from shortform.pipeline.batch import (
+    EpisodeResult,
+    EpisodeStatus,
+    critic_findings,
+    reusable_output,
+    run_batch,
+    write_manifest,
+)
 from shortform.pipeline.context import PipelineContext
 from shortform.pipeline.runner import PipelineRunner
 from shortform.pipeline.stage import PipelineStage
@@ -21,12 +36,43 @@ from shortform.stages.variant_select import VariantSelectionStage
 from shortform.stages.visual_gen import VisualGenStage
 from shortform.store.db import Database
 from shortform.visuals import get_backend, list_backends
+from shortform.visuals.backend import VisualBackend
+from shortform.visuals.critic import ClipCritic
 
 app = typer.Typer(
     name="shortform",
     help="Automated short-form video content creation.",
     no_args_is_help=True,
 )
+
+
+def _build_critic(
+    settings: AppSettings, strategy: StrategyConfig, enabled: bool
+) -> ClipCritic | None:
+    """Continuity critic for generated clips, or None when disabled.
+
+    Opt-in per strategy (`visuals.critic: true`) so existing strategies don't
+    start paying for vision calls on an upgrade. Costs one vision call per
+    generated clip — negligible against the Veo clip it may save regenerating.
+    """
+    if not enabled or not strategy.visuals.get("critic", False):
+        return None
+    import os
+
+    key = settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        typer.echo(
+            "Warning: visuals.critic is enabled but ANTHROPIC_API_KEY is not set "
+            "— clips will NOT be checked for continuity.",
+            err=True,
+        )
+        return None
+    from shortform.visuals.critic import DEFAULT_MODEL
+
+    return ClipCritic(
+        api_key=key,
+        model=strategy.visuals.get("critic_model", DEFAULT_MODEL),
+    )
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -206,6 +252,21 @@ def generate_from_script(
     visual_backend: str | None = typer.Option(
         None, "--visual-backend", "-vb", help="Visual backend (pillow, veo)"
     ),
+    video_id: str | None = typer.Option(
+        None, "--video-id",
+        help="Resume into an existing video's working directory, reusing any "
+             "clips already generated there. Use after an interrupted run so "
+             "you don't pay to regenerate what succeeded.",
+    ),
+    regenerate: bool = typer.Option(
+        False, "--regenerate",
+        help="Regenerate visuals even when clips already exist (use after "
+             "changing prompts, reference images, or camera config).",
+    ),
+    no_critic: bool = typer.Option(
+        False, "--no-critic",
+        help="Skip the continuity critic even if the strategy enables it.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:
     """Run TTS → visuals → assembly from an existing script JSON.
@@ -213,6 +274,10 @@ def generate_from_script(
     Skips script_gen entirely (no Claude call, no ANTHROPIC key needed for
     that stage). The script's strategy_name determines which strategy YAML
     is loaded for TTS/visuals/music config.
+
+    Visual generation reuses clips already present in the working directory, so
+    an interrupted run resumes with `--video-id <id>` and only pays for what's
+    missing. Pass `--regenerate` to force fresh visuals.
     """
     _setup_logging(verbose)
     logger = logging.getLogger("shortform.cli")
@@ -266,17 +331,27 @@ def generate_from_script(
         ScriptGenStage(),
         VariantSelectionStage(),
         TTSStage(),
-        VisualGenStage(backend=backend),
+        VisualGenStage(
+            backend=backend,
+            reuse_existing=not regenerate,
+            critic=_build_critic(settings, strat, enabled=not no_critic),
+        ),
         AssemblyStage(),
     ]
     runner = PipelineRunner(stages=stages, db=db)
 
+    # Reusing a video id means reusing its working directory, which is what makes
+    # already-generated clips discoverable. A fresh id gets a fresh directory and
+    # therefore regenerates everything.
     video = Video(
         strategy_name=script_obj.strategy_name,
         topic=script_obj.topic,
         title=script_obj.title,
         script_id=script_obj.id,
     )
+    if video_id:
+        video.id = video_id
+        logger.info("Resuming into existing video %s — reusing any clips found", video_id)
     ctx = PipelineContext(
         settings=settings,
         strategy=strat,
@@ -353,3 +428,215 @@ def main() -> None:
 
 if __name__ == "__main__":
     app()
+
+
+def _resolve_backend_name(
+    settings: AppSettings, strategy: StrategyConfig, override: str | None
+) -> str:
+    """Visual backend name from CLI flag > strategy declaration > global default."""
+    return str(override or strategy.visuals.get("backend") or settings.visuals.backend)
+
+
+def _resolve_visual_backend(
+    settings: AppSettings, strategy: StrategyConfig, override: str | None
+) -> VisualBackend:
+    """Instantiate the resolved visual backend."""
+    import os
+
+    name = _resolve_backend_name(settings, strategy, override)
+    kwargs: dict[str, str] = {}
+    if name == "veo":
+        key = settings.google_gemini_api_key or os.environ.get(
+            "GOOGLE_GEMINI_API_KEY", ""
+        )
+        if key:
+            kwargs["api_key"] = key
+    return get_backend(name, **kwargs)
+
+
+@app.command("batch")
+def batch(
+    script_paths: list[Path] = typer.Argument(
+        ..., help="Script JSON files to render (shell globs work)."
+    ),
+    visual_backend: str | None = typer.Option(
+        None, "--visual-backend", "-vb", help="Visual backend (pillow, veo)"
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-render episodes that already have a finished video, even when "
+             "the recorded backend matches.",
+    ),
+    regenerate: bool = typer.Option(
+        False, "--regenerate",
+        help="Regenerate visuals even when clips already exist on disk.",
+    ),
+    no_critic: bool = typer.Option(
+        False, "--no-critic", help="Skip the continuity critic."
+    ),
+    stop_on_failure: bool = typer.Option(
+        False, "--stop-on-failure",
+        help="Abort the batch on the first failure instead of continuing.",
+    ),
+    report_path: Path | None = typer.Option(
+        None, "--report", help="Write a JSON report here."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would render without spending anything."
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+) -> None:
+    """Render many episodes unattended, then report what needs a human.
+
+    Each episode's video id is its script id, so assets are addressable
+    (data/assets/<script_id>/) and a re-run after a crash reuses every clip the
+    previous attempt already paid for. Finished episodes are skipped outright.
+
+    A failure isolates to its own episode and the batch continues — except
+    depleted Veo credits, which abort the run, since every remaining episode
+    would fail the same way.
+
+        uv run shortform batch data/scripts/uburex01e*.json -vb veo
+        uv run shortform batch data/scripts/*.json --dry-run
+    """
+    _setup_logging(verbose)
+    logger = logging.getLogger("shortform.cli")
+
+    scripts = sorted({p for p in script_paths if p.suffix == ".json"})
+    missing = [p for p in scripts if not p.exists()]
+    if missing:
+        typer.echo(f"Error: script(s) not found: {', '.join(map(str, missing))}", err=True)
+        raise typer.Exit(1)
+    if not scripts:
+        typer.echo("Error: no script JSON files given.", err=True)
+        raise typer.Exit(1)
+
+    settings = load_settings()
+    paths = settings.paths.resolve()
+    videos_dir = paths["videos_dir"]
+
+    def backend_for(script_path: Path) -> str:
+        """Backend name this episode would render with, for the skip check.
+
+        Resolved per-script because the strategy (read from the script JSON) can
+        declare its own backend — the flagship declares `veo` so a bare batch
+        doesn't silently fall back to Pillow gradients.
+        """
+        try:
+            strategy_name = Script.load_json(script_path).strategy_name
+            return _resolve_backend_name(
+                settings, load_strategy(strategy_name), visual_backend
+            )
+        except Exception:  # noqa: BLE001 — render_one reports the real error
+            return visual_backend or settings.visuals.backend
+
+    def existing_output(script_path: Path) -> str:
+        """A finished video for this episode, or "" if it needs rendering.
+
+        Backend-aware: an output only counts as done if it was produced by the
+        backend we're about to use. Otherwise a cheap `-vb pillow` test run
+        would mark every episode finished and a later Veo pass would render
+        nothing at all.
+        """
+        if force:
+            return ""
+        return reusable_output(videos_dir, script_path.stem, backend_for(script_path))
+
+    if dry_run:
+        typer.echo(f"Would process {len(scripts)} script(s):")
+        # Evaluate once per script — existing_output logs, so calling it twice
+        # would duplicate every warning.
+        plan = [(p, existing_output(p), backend_for(p)) for p in scripts]
+        for script_path, done, backend_name in plan:
+            state = (
+                f"skip (exists: {Path(done).name})" if done
+                else f"RENDER via {backend_name}"
+            )
+            typer.echo(f"  [{state}] {script_path.stem}")
+        pending = [p for p, done, _ in plan if not done]
+        typer.echo("")
+        typer.echo(f"{len(pending)} episode(s) would render. Nothing was spent.")
+        return
+
+    db = Database(paths["db_path"])
+    db.initialize()
+
+    async def render_one(script_path: Path) -> EpisodeResult:
+        result = EpisodeResult(script_path=script_path, script_id=script_path.stem)
+        script_obj = Script.load_json(script_path)
+        if not script_obj.strategy_name:
+            result.status = EpisodeStatus.FAILED
+            result.error = "script JSON has no strategy_name"
+            return result
+
+        strat = load_strategy(script_obj.strategy_name)
+        backend = _resolve_visual_backend(settings, strat, visual_backend)
+
+        stages: list[PipelineStage] = [
+            ScriptGenStage(),
+            VariantSelectionStage(),
+            TTSStage(),
+            VisualGenStage(
+                backend=backend,
+                reuse_existing=not regenerate,
+                critic=_build_critic(settings, strat, enabled=not no_critic),
+            ),
+            AssemblyStage(),
+        ]
+        runner = PipelineRunner(stages=stages, db=db)
+
+        # The script id IS the video id — that is what makes assets addressable
+        # and lets a re-run reuse clips from an interrupted attempt.
+        video = Video(
+            id=script_path.stem,
+            strategy_name=script_obj.strategy_name,
+            topic=script_obj.topic,
+            title=script_obj.title,
+            script_id=script_obj.id,
+        )
+        ctx = PipelineContext(
+            settings=settings, strategy=strat, video=video,
+            script=script_obj, topic=script_obj.topic,
+        )
+        db.save_video(video)
+
+        ctx = await runner.run(ctx, resume_from=stages[0].name)
+
+        result.title = ctx.video.title
+        result.flagged, result.unverified = critic_findings(ctx.artifacts)
+        if ctx.errors:
+            result.status = EpisodeStatus.FAILED
+            result.error = ctx.errors[-1]
+        else:
+            result.status = EpisodeStatus.COMPLETED
+            result.duration = ctx.video.duration
+            result.output_path = str(ctx.video.output_path)
+            # Record which backend produced this, so a later batch can tell a
+            # finished episode from one rendered with a different backend.
+            write_manifest(videos_dir, result, backend.name)
+        return result
+
+    logger.info("Batch: %d script(s)", len(scripts))
+    report = asyncio.run(
+        run_batch(
+            scripts=scripts,
+            render=render_one,
+            already_rendered=existing_output,
+            stop_on_failure=stop_on_failure,
+        )
+    )
+
+    typer.echo("")
+    for line in report.summary_lines():
+        typer.echo(line)
+
+    if report_path:
+        import json
+
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report.to_dict(), indent=2))
+        typer.echo("")
+        typer.echo(f"Report written: {report_path}")
+
+    if not report.ok:
+        raise typer.Exit(1)
