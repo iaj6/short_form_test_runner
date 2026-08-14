@@ -640,3 +640,125 @@ def batch(
 
     if not report.ok:
         raise typer.Exit(1)
+
+
+@app.command("publish-auth")
+def publish_auth(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+) -> None:
+    """Authorize YouTube uploads. Run once; writes a refresh token to .env.
+
+    Needs YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET in .env, from a Google
+    Cloud OAuth client of type "Desktop app" with the YouTube Data API v3
+    enabled.
+    """
+    _setup_logging(verbose)
+    from shortform.publish import oauth
+
+    try:
+        oauth.run_consent_flow()
+    except oauth.MissingCredentials as e:
+        typer.echo(f"Missing credentials: {e}")
+        typer.echo(
+            "\nAdd these to .env from your Google Cloud OAuth client:\n"
+            "  YOUTUBE_CLIENT_ID=...\n"
+            "  YOUTUBE_CLIENT_SECRET=..."
+        )
+        raise typer.Exit(1) from e
+    except RuntimeError as e:
+        typer.echo(str(e))
+        raise typer.Exit(1) from e
+
+    typer.echo(f"\nSaved YOUTUBE_REFRESH_TOKEN to {oauth.ENV_FILE}")
+    typer.echo("You can now run `shortform publish <video-id>`.")
+
+
+@app.command()
+def publish(
+    video_id: str = typer.Argument(..., help="Script/video id, e.g. uburex01e01"),
+    privacy: str = typer.Option(
+        "private", "--privacy",
+        help="private | unlisted | public. Defaults to private so nothing "
+             "reaches an audience without a human step.",
+    ),
+    title: str | None = typer.Option(None, "--title", help="Override the title"),
+    allow_flagged: bool = typer.Option(
+        False, "--allow-flagged",
+        help="Upload even though the critic flagged clips in this episode.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be uploaded, spend nothing."
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+) -> None:
+    """Upload a rendered episode to YouTube.
+
+    Deliberately separate from `generate` and `batch`: rendering is unattended,
+    but publishing is the one irreversible step, so it stays a thing you run
+    after watching the episode.
+    """
+    _setup_logging(verbose)
+    from shortform.publish import episode as ep_mod
+    from shortform.publish import oauth, youtube
+
+    if privacy not in ("private", "unlisted", "public"):
+        typer.echo(f"Invalid --privacy {privacy!r}: use private, unlisted or public")
+        raise typer.Exit(1)
+
+    try:
+        ep = ep_mod.load_episode(video_id)
+    except FileNotFoundError as e:
+        typer.echo(str(e))
+        raise typer.Exit(1) from e
+
+    blockers = ep_mod.blocking_reasons(ep, allow_flagged=allow_flagged)
+    for reason in blockers:
+        typer.echo(f"BLOCKED: {reason}")
+    if blockers:
+        raise typer.Exit(1)
+
+    metadata = youtube.build_metadata(
+        title=title or ep.title,
+        description=ep_mod.build_description(ep),
+        tags=ep_mod.build_tags(ep),
+        privacy=privacy,
+        category_id=str(ep.publish_config.get("category_id", youtube.DEFAULT_CATEGORY_ID)),
+    )
+
+    size_mb = ep.video_path.stat().st_size / 1e6
+    typer.echo(f"Episode:  {ep.video_id}")
+    typer.echo(f"File:     {ep.video_path.name} ({size_mb:.1f} MB)")
+    typer.echo(f"Title:    {metadata['snippet']['title']}")
+    typer.echo(f"Privacy:  {privacy}")
+    if metadata["snippet"]["tags"]:
+        typer.echo(f"Tags:     {', '.join(metadata['snippet']['tags'])}")
+    typer.echo("Description:")
+    for line in metadata["snippet"]["description"].splitlines():
+        typer.echo(f"  {line}")
+    if ep.unverified:
+        typer.echo(
+            f"\nNote: {len(ep.unverified)} clip(s) were never checked by the "
+            "critic (not the same as checked and failed)."
+        )
+
+    if dry_run:
+        typer.echo("\n(dry run — nothing uploaded)")
+        return
+
+    try:
+        token = oauth.get_access_token()
+    except (oauth.MissingCredentials, RuntimeError) as e:
+        typer.echo(f"\n{e}")
+        raise typer.Exit(1) from e
+
+    typer.echo("\nUploading...")
+    try:
+        result = youtube.upload(ep.video_path, metadata, token)
+    except (RuntimeError, FileNotFoundError) as e:
+        typer.echo(f"\nUpload failed: {e}")
+        raise typer.Exit(1) from e
+
+    typer.echo(f"\nUploaded: {result.url}")
+    typer.echo(f"Privacy:  {result.privacy}")
+    if result.privacy == "private":
+        typer.echo("Promote it in YouTube Studio when you're happy with it.")

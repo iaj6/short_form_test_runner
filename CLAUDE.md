@@ -134,6 +134,38 @@ The marker is written at the **start** of a run, not the end, so an interrupted 
 
 Sequential on purpose: Veo is rate-limited, and a batch you can Ctrl-C without leaving half-written parallel state is worth more than the wall-clock a concurrent version would save.
 
+## Publishing (`publish/`, `shortform publish`)
+
+```
+shortform publish-auth                      # once: browser consent -> refresh token in .env
+shortform publish uburex01e01 --dry-run     # show the upload, spend nothing
+shortform publish uburex01e01               # upload, private by default
+```
+
+**Not a pipeline stage, on purpose.** Rendering is unattended; publishing is the one irreversible step. It stays a separate command you run after watching the episode — the same editorial-gate reasoning as `script` → `generate-from-script`. `stages/publish.py` is gone; nothing in the runner touches this.
+
+**Private by default.** Uploads land as `privacyStatus: private` and you promote them in YouTube Studio. `--privacy unlisted|public` overrides. An automated uploader whose default is `public` puts a broken episode in front of an audience the first time the critic misses something, which this session established is not hypothetical.
+
+**Flagged clips block the upload**, overridable with `--allow-flagged`. The critic flags a clip only after exhausting its regenerate ladder, so a flag means a human was meant to look. `unverified` deliberately does *not* block — "never checked" is a weaker signal than "checked and failed", and blocking on it would stop every upload made without an `ANTHROPIC_API_KEY`. An upload also costs ~1600 of the default 10,000 daily quota units, i.e. roughly **six uploads per day**, so spending one on a known-bad episode is worth preventing on its own.
+
+**Stdlib only** — no `google-api-python-client` or `google-auth-oauthlib`. The whole flow is two OAuth calls plus a file upload; the Google SDKs would add a large transitive tree to otherwise slim runtime deps. Same instinct as subprocessing the F5-TTS CLI rather than importing torch.
+
+**Resumable upload, not simple upload.** These files are 40–70 MB. A simple POST that dies at 90% starts over; the resumable protocol lets a retry ask the server how many bytes actually landed (`Content-Range: bytes */TOTAL` → `308` + `Range`) and continue. If the offset can't be determined the code restarts from zero — wasteful, but a *wrong* offset corrupts the file.
+
+**The 7-day refresh token trap** (documented at the top of `publish/oauth.py`): while the OAuth consent screen is in "Testing" status, Google expires refresh tokens after 7 days and uploads start failing with `invalid_grant`. Set the consent screen to "In production" — unverified is fine, you just get a warning page and a 100-user cap. The error path sniffs `invalid_grant` and says this, because the raw message doesn't.
+
+Per-strategy metadata via a `publish:` block; all fields optional:
+
+```yaml
+publish:
+  description: "{title} — {topic}"   # {title} and {topic} are substituted
+  footer: "Adapted from Jarry's Ubu roi (1896)."
+  tags: ["claymation", "puppets", "absurdism"]
+  category_id: "24"                  # 24 = Entertainment
+```
+
+`#Shorts` is appended unless the description already contains it — vertical and under three minutes qualifies, but only if labelled. The callback port (8890) is registered in `~/.ports.json`.
+
 ## Continuity critic (`visuals/critic.py`)
 
 The pipeline's feedback loop. Without it, `visual_gen` generates and `assembly` muxes without anything ever *looking* at the output — a swapped character surfaces only when a human watches the finished episode, which is exactly what an unattended batch doesn't do.
@@ -238,7 +270,7 @@ Attempted (HunyuanVideo I2V on a 32GB Apple Silicon machine) and shelved. The mo
 These are real next-step ideas, not commitments. None block current functionality.
 
 - ~~**Music selector**~~ — done. `music/selector.py` scores tracks against vignette content per video.
-- **Publish automation** — `src/shortform/stages/publish.py` is a stub. YT Data API v3 OAuth flow + resumable upload is ~5–6 hours of work. Deferred until a published channel has data to validate against. **The only large untouched item on this list.**
+- ~~**Publish automation**~~ — done for YouTube. See the publishing section above. Instagram Reels is still open and is a bigger job than it looks: Graph API, a Business/Creator account linked to a Facebook Page, and a *publicly reachable URL* for the video file, which this pipeline has no way to produce today.
 - ~~**Cost optimization for Veo strategies**~~ — done, and it turned out to be a quality fix rather than only a cost one. `adapt_play.py`'s segment target now derives from `CLIP_TARGET_SECONDS` to hold segments to 2 clips; the ~30% cost saving is real but secondary to removing a generation of chained character drift. Note this was rediscovered from the quality side without anyone noticing it was already on this list — worth consulting before starting work.
 - ~~**Whisper subtitle alignment**~~ — done. `src/shortform/tts/whisper_align.py` recovers word timings for backends that don't emit them (F5-TTS), gated on `visuals.subtitles`. Soft-deps on `faster-whisper` via the `captions` extra; degrades to no captions if absent. It's free transcription rather than forced alignment against the known script, so caption words come from ASR and can occasionally differ from the narration — upgrade to whisperx/stable-ts if that drift ever matters.
 - **Alternate visual backends** — Kling for looser-filter content, or another local-model attempt on heavier hardware. The `src/shortform/visuals/registry.py` pattern makes adding one straightforward.
