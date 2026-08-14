@@ -87,7 +87,9 @@ class VeoBackend:
 
         # Step 2: Build animation prompt
         animation_prompt = _build_animation_prompt(
-            segment.visual_prompt,
+            # Per-clip prompt when VisualGenStage scoped the stage directions to
+            # this clip's slice of the audio; the segment's own prompt otherwise.
+            config.get("visual_prompt_override") or segment.visual_prompt,
             config.get("animation_style", "cinematic slow push-in"),
             config.get("speech_schedule", ""),
         )

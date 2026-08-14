@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -233,6 +234,7 @@ class VisualGenStage:
         work_dir: Path,
         expected_characters: str,
         reviews: list[dict[str, Any]],
+        intended_action: str = "",
     ) -> VisualOutput:
         """Generate one clip, review it, and retry on a fatal continuity failure.
 
@@ -282,10 +284,10 @@ class VisualGenStage:
                 reference_path=Path(reference_path),
                 work_dir=work_dir,
                 expected_characters=expected_characters,
-                # Without this the critic scores a scripted exit as the model
-                # having lost the character, and burns the whole ladder below
-                # regenerating a shot that was doing what the script asked.
-                intended_action=segment.staged_action,
+                # Scoped to THIS clip. The whole segment's directions would tell
+                # the critic to expect a one-time action in every clip, which is
+                # how e03 passed four consecutive exits as intended.
+                intended_action=intended_action,
             )
             reviews.append(
                 {
@@ -412,6 +414,18 @@ class VisualGenStage:
                     Path(resolved_ref).name,
                 )
 
+            # Known before clip 0 because it depends only on the audio length,
+            # and clip 0 needs it to scope its own stage directions.
+            target_seconds = seg.actual_duration or seg.estimated_duration
+            n_clips_total = max(1, math.ceil(target_seconds / CLIP_TARGET_SECONDS))
+
+            first_action = build_staged_action(
+                seg, 0, CLIP_TARGET_SECONDS, n_clips_total
+            )
+            seg_config["visual_prompt_override"] = scope_visual_prompt(
+                seg.visual_prompt, first_action
+            )
+
             # Always generate clip 0 first so we can see the output type before
             # deciding whether to generate more.
             first_output = video_dir / f"segment_{seg.index:02d}"
@@ -437,6 +451,7 @@ class VisualGenStage:
                     work_dir=video_dir / "critic",
                     expected_characters=expected_characters,
                     reviews=critic_reviews,
+                    intended_action=first_action,
                 )
             seg.image_path = str(first_result.path)
             segment_types = ctx.artifacts.setdefault("segment_visual_types", {})
@@ -456,10 +471,6 @@ class VisualGenStage:
             # doesn't drift across segments.
             clip_paths: list[str] = [str(first_result.path)]
             if first_result.output_type == VisualOutputType.VIDEO:
-                target_seconds = seg.actual_duration or seg.estimated_duration
-                n_clips_total = max(
-                    1, math.ceil(target_seconds / CLIP_TARGET_SECONDS)
-                )
                 if n_clips_total > 1:
                     logger.info(
                         "Segment %d needs %d clips for %.1fs audio (chained)",
@@ -485,6 +496,14 @@ class VisualGenStage:
                             seg, extra_idx, CLIP_TARGET_SECONDS, speaker_descriptions
                         ),
                     }
+                    # Same reasoning as the schedule: the directions belong to
+                    # the turns this clip covers, not to the whole segment.
+                    extra_action = build_staged_action(
+                        seg, extra_idx, CLIP_TARGET_SECONDS, n_clips_total
+                    )
+                    chain_config["visual_prompt_override"] = scope_visual_prompt(
+                        seg.visual_prompt, extra_action
+                    )
 
                     extra_output = (
                         video_dir / f"segment_{seg.index:02d}_clip_{extra_idx:02d}"
@@ -515,6 +534,7 @@ class VisualGenStage:
                         work_dir=video_dir / "critic",
                         expected_characters=expected_characters,
                         reviews=critic_reviews,
+                        intended_action=extra_action,
                     )
 
                     # If the chained generation got rejected (e.g., Veo safety
@@ -629,6 +649,68 @@ def _probe_duration(path: Path) -> float:
         return 0.0
 
 
+_ACTION_CLAUSE = re.compile(r"\s*Action:\s.*$", re.DOTALL)
+
+
+def build_staged_action(
+    segment: Segment, clip_index: int, clip_seconds: float, n_clips: int
+) -> str:
+    """The stage directions belonging to the slice of audio one clip covers.
+
+    A stage direction annotates ONE turn and describes something that happens
+    once. A segment, though, is several chained clips, so handing the whole
+    segment's directions to every clip tells the model to perform a one-time
+    action repeatedly — and because clip M+1 chains from clip M's last frame,
+    it starts from the post-action state and has to reset in order to do it
+    again. Ubu Rex e03 segment 1 carried "PERE UBU going out, slamming the
+    door" into all four clips: he exited four times, and the door Veo invented
+    to satisfy the direction was baked into every chain anchor until it
+    dominated the frame.
+
+    Scoped by `turn_timings`, the same windowing `build_speech_schedule` uses.
+    Without timings a direction cannot be located, so it goes to the final clip
+    — an unplaceable direction is far more likely to close a beat than open it,
+    and one clip performing it is right where every clip performing it is wrong.
+    """
+    directions = [
+        (t.speaker, t.stage_direction) for t in segment.turns if t.stage_direction.strip()
+    ]
+    if not directions:
+        return ""
+
+    if not segment.turn_timings:
+        return segment.staged_action if clip_index == n_clips - 1 else ""
+
+    window_start = clip_index * clip_seconds
+    window_end = window_start + clip_seconds
+
+    # Timings are per turn and in turn order, so zip against the turns to find
+    # which window each annotated turn lands in.
+    beats: list[str] = []
+    for turn, timing in zip(segment.turns, segment.turn_timings):
+        if not turn.stage_direction.strip():
+            continue
+        turn_end = timing.start + timing.duration
+        if turn_end <= window_start or timing.start >= window_end:
+            continue
+        beats.append(f"{turn.speaker} {turn.stage_direction}".strip())
+
+    return "; ".join(beats)
+
+
+def scope_visual_prompt(visual_prompt: str, clip_action: str) -> str:
+    """Replace the prompt's `Action:` clause with this clip's directions.
+
+    `adapt_play.py` composes the whole segment's directions into a trailing
+    `Action: ...` sentence, which then reaches every clip. Rewriting it per clip
+    is what stops the model from staging the same exit four times.
+    """
+    base = _ACTION_CLAUSE.sub("", visual_prompt).strip()
+    if not clip_action:
+        return base
+    return f"{base} Action: {clip_action}."
+
+
 def build_speech_schedule(
     segment: Segment,
     clip_index: int,
@@ -730,6 +812,18 @@ def _build_variant_resolver(strategy_visuals: dict[str, Any]):
         candidate_key = variant_key or default_key
         if candidate_key and candidate_key in variants_by_key and manifest_dir:
             return str(manifest_dir / variants_by_key[candidate_key])
+        if candidate_key and variants_by_key:
+            # Falling back is right — a render beats no render — but doing it
+            # silently is not. The fallback is usually a DIFFERENT CAST than the
+            # segment asked for (a solo segment anchored to a two-hander), so
+            # the critic then reports the absent character as missing on every
+            # clip and the ladder burns itself out on an unfixable mismatch.
+            logger.warning(
+                "Segment asked for variant '%s', which the manifest doesn't "
+                "define — falling back to %s. Generate the variant if this "
+                "segment's cast differs from the fallback's.",
+                candidate_key, Path(fallback_ref).name or "(none)",
+            )
         # Fall back to the strategy's singular reference_image (legacy path)
         return fallback_ref
 

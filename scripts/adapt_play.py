@@ -67,6 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from shortform.config import load_strategy  # noqa: E402
 from shortform.models.script import Script, Segment, Turn  # noqa: E402
+from shortform.stages.visual_gen import CLIP_TARGET_SECONDS  # noqa: E402
 from shortform.tts.cast import (  # noqa: E402
     DEFAULT_STAGE_DIRECTION_GAP,
     DEFAULT_TURN_GAP,
@@ -110,6 +111,24 @@ LONG_SEGMENT_WARN = 30.0
 # distance penalty maxes near 0.5 unweighted, so without this a marked beat would
 # win at ANY legal duration and the target would be decorative.
 TARGET_WEIGHT = 2.0
+
+# How many chained Veo clips a segment may need. Derived from the real clip
+# length rather than guessed, so the two can't drift apart.
+#
+# This is a QUALITY ceiling, not just a cost one. A segment is covered by
+# ceil(duration / CLIP_TARGET_SECONDS) clips, and only clip 0 is anchored to the
+# hero — every later clip chains from the previous clip's LAST FRAME, so each
+# hop is a fresh generation of character drift compounding on the last. At the
+# old 22s target a segment ran to 3-4 clips, i.e. 2-3 generations of drift, and
+# Ubu Rex e03 showed what that looks like: a costumed puppet arriving at the
+# final clip nude, recoloured, and mid-tantrum. Two clips means one hop.
+#
+# Enforced by LOOKING AHEAD — a segment closes before the speech that would
+# breach the budget, not after. Breaking on the running total once it had
+# already reached the target let a segment overshoot by a whole speech, which
+# is how a 13s target still produced 22.7s and 23.5s segments (4 and 3 clips).
+MAX_CLIPS_PER_SEGMENT = 2
+SEGMENT_BUDGET_SECONDS = MAX_CLIPS_PER_SEGMENT * CLIP_TARGET_SECONDS
 
 # Boundary desirability. Scored against distance-from-target, so a slightly
 # short episode ending on a scene change beats a perfectly-sized one that cuts
@@ -286,11 +305,21 @@ def split_episodes(
     return episodes
 
 
-def split_segments(episode: Chunk, segment_target: float) -> list[Chunk]:
+def split_segments(episode: Chunk, segment_budget: float) -> list[Chunk]:
     """Cut an episode into visual beats.
 
     Forced breaks: scene change (different backdrop) and explicit `beat: true`.
-    Soft break: the running segment has reached `segment_target`.
+    Budget break: adding the next speech would push the segment past
+    `segment_budget` seconds, i.e. past MAX_CLIPS_PER_SEGMENT Veo clips.
+
+    The budget is checked by LOOKING AHEAD at the speech about to be added.
+    Breaking once the running total had already reached the budget let a segment
+    overshoot by its whole final speech — a 13s target still produced 23.5s
+    segments, which is 3 chained clips and 2 generations of drift.
+
+    A single speech longer than the budget still stands alone and needs more
+    clips: a turn is atomic, and splitting one mid-sentence would put a hard cut
+    inside a continuous line of dialogue.
     """
     segments: list[Chunk] = []
     current: list[Speech] = []
@@ -300,7 +329,7 @@ def split_segments(episode: Chunk, segment_target: float) -> list[Chunk]:
         forced = bool(current) and (
             sp.beat or sp.scene_number != current[-1].scene_number
         )
-        if forced or (current and running >= segment_target):
+        if forced or (current and running + sp.seconds > segment_budget):
             segments.append(Chunk(current))
             current, running = [], 0.0
         current.append(sp)
@@ -412,7 +441,15 @@ def main() -> int:
     ap.add_argument("--target", type=float, default=70.0, help="target episode seconds")
     ap.add_argument("--min", dest="min_s", type=float, default=45.0)
     ap.add_argument("--max", dest="max_s", type=float, default=85.0)
-    ap.add_argument("--segment-target", type=float, default=22.0)
+    ap.add_argument(
+        "--segment-target", type=float, default=SEGMENT_BUDGET_SECONDS,
+        help=(
+            f"Max seconds of audio per visual beat (default "
+            f"{SEGMENT_BUDGET_SECONDS:.0f}s = {MAX_CLIPS_PER_SEGMENT} chained Veo "
+            "clips). Raising it buys longer unbroken shots and pays for them in "
+            "chained character drift."
+        ),
+    )
     ap.add_argument("--start-episode", type=int, default=1)
     ap.add_argument("--dry-run", action="store_true", help="report without writing")
     args = ap.parse_args()

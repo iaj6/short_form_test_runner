@@ -408,7 +408,36 @@ def test_review_forwards_the_intended_action(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stage_hands_the_critic_the_scripted_action(tmp_path: Path):
-    """THE fix: the exit reaches the critic instead of being invisible to it."""
+    """The exit reaches the critic instead of being invisible to it.
+
+    The action is now passed in per clip rather than derived from the whole
+    segment — see `build_staged_action`, which decides WHICH clip gets it.
+    Deriving it here is what let one exit be expected in all four of a
+    segment's clips.
+    """
+    from shortform.stages.visual_gen import VisualGenStage
+
+    seg = Segment(
+        index=1, visual_prompt="x",
+        turns=[Turn(speaker="PERE UBU", line="Off I go.",
+                    stage_direction="going out, slamming the door")],
+    )
+    critic = _ScriptedCritic(failures=0)
+    stage = VisualGenStage(backend=_FakeBackend(tmp_path), critic=critic)
+
+    await stage._generate_reviewed(
+        segment=seg, output_path=tmp_path / "seg", width=1080, height=1920,
+        config={"reference_image": "ref.png"}, label="test",
+        reference_path="ref.png", work_dir=tmp_path, expected_characters="",
+        reviews=[], intended_action="PERE UBU going out, slamming the door",
+    )
+    assert critic.seen_actions == ["PERE UBU going out, slamming the door"]
+
+
+@pytest.mark.asyncio
+async def test_a_clip_given_no_action_tells_the_critic_nothing(tmp_path: Path):
+    """A clip that covers no annotated turn goes back to strict comparison —
+    it must not inherit an exit it isn't supposed to be performing."""
     from shortform.stages.visual_gen import VisualGenStage
 
     seg = Segment(
@@ -425,7 +454,7 @@ async def test_stage_hands_the_critic_the_scripted_action(tmp_path: Path):
         reference_path="ref.png", work_dir=tmp_path, expected_characters="",
         reviews=[],
     )
-    assert critic.seen_actions == ["PERE UBU going out, slamming the door"]
+    assert critic.seen_actions == [""]
 
 
 @pytest.mark.asyncio
@@ -520,3 +549,92 @@ async def test_a_clip_passing_only_on_retry_is_not_flagged(tmp_path: Path):
         reviews=[],
     )
     assert stage._flagged == set()
+
+
+# --- character_check is load-bearing ----------------------------------------
+#
+# Two prompt-only attempts to hold the costume boundary failed under real
+# conditions. Told a character was performing a scripted exit, the critic
+# stopped evaluating that character: e03 passed a clip in which Pere Ubu had
+# become a smooth nude featureless pear, with the verdict "Pere Ubu exits
+# through the door as scripted while the woman ... remains consistent". A
+# required schema field can't be skipped the way a clause in prose can.
+
+
+def test_costume_mismatch_fails_even_with_no_issues_reported():
+    """THE fix: the model must ASSERT the costume is fine, not merely neglect
+    to mention that it isn't."""
+    v = _verdict_from({
+        "issues": [],
+        "character_check": [
+            {"character": "Pere Ubu", "costume_matches": False,
+             "note": "bare, no sleeves or trousers, moustache gone"},
+        ],
+        "summary": "he exits through the door as scripted",
+    })
+    assert not v.passed
+    assert v.fatal_issues[0].kind == "character_replaced"
+    assert "Pere Ubu" in v.fatal_issues[0].detail
+
+
+def test_costume_ok_does_not_invent_an_issue():
+    v = _verdict_from({
+        "issues": [],
+        "character_check": [
+            {"character": "Pere Ubu", "costume_matches": True, "note": "on model"},
+            {"character": "Mere Ubu", "costume_matches": True, "note": "on model"},
+        ],
+        "summary": "ok",
+    })
+    assert v.passed and v.issues == []
+
+
+def test_one_bad_costume_among_several_still_fails():
+    v = _verdict_from({
+        "issues": [],
+        "character_check": [
+            {"character": "Mere Ubu", "costume_matches": True, "note": "on model"},
+            {"character": "Pere Ubu", "costume_matches": False, "note": "nude"},
+        ],
+        "summary": "she is consistent",
+    })
+    assert not v.passed
+    assert len(v.fatal_issues) == 1
+
+
+def test_costume_failure_merges_with_reported_issues():
+    v = _verdict_from({
+        "issues": [{"kind": "quality_degraded", "severity": MINOR, "detail": "soft"}],
+        "character_check": [
+            {"character": "Pere Ubu", "costume_matches": False, "note": "nude"},
+        ],
+        "summary": "drifting",
+    })
+    assert not v.passed
+    assert len(v.issues) == 2
+
+
+def test_missing_character_check_still_parses():
+    """Older payloads and malformed responses must not crash — a critic that
+    throws is worse than no critic."""
+    v = _verdict_from({"issues": [], "summary": "ok"})
+    assert v.passed
+
+
+def test_malformed_character_check_entries_are_ignored():
+    v = _verdict_from({
+        "issues": [],
+        "character_check": ["not a dict", {"character": "X"}, None],
+        "summary": "ok",
+    })
+    assert v.passed
+
+
+def test_character_check_is_required_by_the_schema():
+    """If it's optional the model will omit it for exactly the character the
+    action gave it an excuse to skip."""
+    from shortform.visuals.critic import VERDICT_TOOL
+
+    assert "character_check" in VERDICT_TOOL["input_schema"]["required"]
+    item = VERDICT_TOOL["input_schema"]["properties"]["character_check"]["items"]
+    assert set(item["required"]) == {"character", "costume_matches", "note"}

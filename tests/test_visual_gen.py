@@ -437,3 +437,104 @@ def test_clearing_stale_visuals_drops_the_flagged_record(tmp_path: Path):
 
     assert stage._flagged == set()
     assert not (tmp_path / FLAGGED_FILE).exists()
+
+
+# --- Stage directions belong to a clip, not a segment -----------------------
+#
+# Ubu Rex e03 segment 1 carried "PERE UBU going out, slamming the door" into
+# all four of its chained clips. He exited four times: each clip staged the
+# exit, and because clip M+1 chains from clip M's LAST frame, the next clip
+# began post-exit and had to bring him back to do it again. The door Veo
+# invented for the direction was baked into every chain anchor until it
+# dominated the composition. The critic passed all four, citing the action.
+
+
+def _exit_segment() -> Segment:
+    from shortform.models.script import Segment, Turn, TurnTiming
+
+    seg = Segment(
+        index=1,
+        visual_prompt="A cramped interior. On stage: MERE UBU and PERE UBU. "
+                      "Action: MERE UBU aside; PERE UBU going out, slamming the door.",
+        turns=[
+            Turn(speaker="MERE UBU", line="a", stage_direction="aside"),
+            Turn(speaker="PERE UBU", line="b"),
+            Turn(speaker="PERE UBU", line="c",
+                 stage_direction="going out, slamming the door"),
+        ],
+    )
+    # Three turns across ~22s of audio: one per clip window of 7.5s.
+    seg.turn_timings = [
+        TurnTiming(speaker="MERE UBU", start=0.0, duration=7.0),
+        TurnTiming(speaker="PERE UBU", start=7.5, duration=7.0),
+        TurnTiming(speaker="PERE UBU", start=15.0, duration=7.0),
+    ]
+    return seg
+
+
+def test_the_exit_reaches_only_its_own_clip():
+    """THE bug: four clips, one exit."""
+    from shortform.stages.visual_gen import CLIP_TARGET_SECONDS, build_staged_action
+
+    seg = _exit_segment()
+    actions = [
+        build_staged_action(seg, i, CLIP_TARGET_SECONDS, 3) for i in range(3)
+    ]
+    assert actions[0] == "MERE UBU aside"
+    assert actions[1] == ""
+    assert actions[2] == "PERE UBU going out, slamming the door"
+
+
+def test_a_clip_with_no_directions_gets_none():
+    from shortform.stages.visual_gen import CLIP_TARGET_SECONDS, build_staged_action
+
+    assert build_staged_action(_exit_segment(), 1, CLIP_TARGET_SECONDS, 3) == ""
+
+
+def test_segment_without_directions_is_empty_everywhere():
+    from shortform.models.script import Segment, Turn
+    from shortform.stages.visual_gen import CLIP_TARGET_SECONDS, build_staged_action
+
+    seg = Segment(index=0, turns=[Turn(speaker="MERE UBU", line="a")])
+    assert build_staged_action(seg, 0, CLIP_TARGET_SECONDS, 2) == ""
+
+
+def test_untimed_directions_go_to_the_last_clip_only():
+    """Without timings a direction can't be placed. One clip performing it is
+    right where every clip performing it is wrong."""
+    from shortform.models.script import Segment, Turn
+    from shortform.stages.visual_gen import CLIP_TARGET_SECONDS, build_staged_action
+
+    seg = Segment(
+        index=0,
+        turns=[Turn(speaker="PERE UBU", line="b", stage_direction="going out")],
+    )
+    assert build_staged_action(seg, 0, CLIP_TARGET_SECONDS, 3) == ""
+    assert build_staged_action(seg, 2, CLIP_TARGET_SECONDS, 3) == "PERE UBU going out"
+
+
+def test_visual_prompt_action_clause_is_replaced_per_clip():
+    from shortform.stages.visual_gen import scope_visual_prompt
+
+    prompt = _exit_segment().visual_prompt
+    scoped = scope_visual_prompt(prompt, "MERE UBU aside")
+    assert scoped.endswith("Action: MERE UBU aside.")
+    assert "going out" not in scoped
+    assert "On stage: MERE UBU and PERE UBU." in scoped
+
+
+def test_a_clip_with_no_action_gets_no_action_clause():
+    """Veo staged an exit in every clip because every clip's prompt asked for
+    one. A clip covering no annotated turn must not mention the door at all."""
+    from shortform.stages.visual_gen import scope_visual_prompt
+
+    scoped = scope_visual_prompt(_exit_segment().visual_prompt, "")
+    assert "Action:" not in scoped
+    assert "door" not in scoped
+    assert scoped.endswith("On stage: MERE UBU and PERE UBU.")
+
+
+def test_scoping_a_prompt_that_never_had_an_action_is_a_no_op():
+    from shortform.stages.visual_gen import scope_visual_prompt
+
+    assert scope_visual_prompt("A quiet room.", "") == "A quiet room."
