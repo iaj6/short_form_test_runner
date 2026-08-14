@@ -449,7 +449,7 @@ def test_clearing_stale_visuals_drops_the_flagged_record(tmp_path: Path):
 # dominated the composition. The critic passed all four, citing the action.
 
 
-def _exit_segment() -> "Segment":
+def _exit_segment() -> Segment:
     from shortform.models.script import Segment, Turn, TurnTiming
 
     seg = Segment(

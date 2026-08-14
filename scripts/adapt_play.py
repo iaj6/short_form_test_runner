@@ -66,8 +66,8 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from shortform.config import load_strategy  # noqa: E402
-from shortform.stages.visual_gen import CLIP_TARGET_SECONDS  # noqa: E402
 from shortform.models.script import Script, Segment, Turn  # noqa: E402
+from shortform.stages.visual_gen import CLIP_TARGET_SECONDS  # noqa: E402
 from shortform.tts.cast import (  # noqa: E402
     DEFAULT_STAGE_DIRECTION_GAP,
     DEFAULT_TURN_GAP,

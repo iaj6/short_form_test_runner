@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Six test files shell out to ffmpeg to build real MP4s and PNGs rather
+      # than mocking them — the assembly and critic paths are ffmpeg behaviour,
+      # so faking it would test the mock. Without this step the suite fails on
+      # FileNotFoundError, not on anything to do with the code.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --extra dev, not --all-extras: `captions` pulls faster-whisper, which
+      # the suite never exercises and which is a slow install for nothing.
+      - name: Install
+        run: uv sync --extra dev
+
+      - name: Test
+        run: uv run pytest -q
+
+# Not gated here yet: `ruff check` and `mypy src` both fail on pre-existing
+# issues in code this workflow didn't touch (long lines in scripts/, missing
+# annotations in the visual and TTS registries). Adding them now would paint
+# every PR red for debt it didn't create. They're worth turning on right after
+# a cleanup pass — the tests are the gate that actually catches regressions.
