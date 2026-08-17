@@ -110,6 +110,7 @@ class StrategyConfig(BaseModel):
     visuals: dict[str, Any] = {}
     tts: dict[str, Any] = {}  # backend selection + params (ref_audio, ref_text, ...)
     music: dict[str, Any] = {}  # track, volume overrides
+    publish: dict[str, Any] = {}  # per-channel upload metadata (see publish/episode.py)
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
