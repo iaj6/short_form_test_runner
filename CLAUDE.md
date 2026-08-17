@@ -152,7 +152,14 @@ shortform publish uburex01e01               # upload, private by default
 
 **Resumable upload, not simple upload.** These files are 40–70 MB. A simple POST that dies at 90% starts over; the resumable protocol lets a retry ask the server how many bytes actually landed (`Content-Range: bytes */TOTAL` → `308` + `Range`) and continue. If the offset can't be determined the code restarts from zero — wasteful, but a *wrong* offset corrupts the file.
 
-**The 7-day refresh token trap** (documented at the top of `publish/oauth.py`): while the OAuth consent screen is in "Testing" status, Google expires refresh tokens after 7 days and uploads start failing with `invalid_grant`. Set the consent screen to "In production" — unverified is fine, you just get a warning page and a 100-user cap. The error path sniffs `invalid_grant` and says this, because the raw message doesn't.
+**Two setup traps, both from the consent screen being in "Testing" status** (documented at the top of `publish/oauth.py`). Console: *APIs & Services → OAuth consent screen*, or *Google Auth Platform → Audience* in the newer UI. **PUBLISH APP** fixes both:
+
+| symptom | when | fix |
+|---|---|---|
+| `Error 403: access_denied` — "can only be accessed by developer-approved testers" | immediately, on the consent page | publish the app, or add the account under *Test users* |
+| `invalid_grant` on upload | ~7 days after a flow that worked | publish the app — a test user entry does **not** fix this |
+
+Publishing doesn't require passing Google verification. `youtube.upload` is a sensitive scope so the console asks for it, but an unverified production app works — warning page on consent, 100-user cap. The error path sniffs `invalid_grant` and explains it, because the raw message doesn't.
 
 Per-strategy metadata via a `publish:` block; all fields optional:
 

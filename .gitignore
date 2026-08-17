@@ -62,3 +62,9 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Google OAuth client secrets, however they're named on download.
+# The console hands these out as client_secret_<id>.apps.googleusercontent.com.json,
+# straight into whatever directory you saved them in.
+client_secret*.json
+*.apps.googleusercontent.com.json

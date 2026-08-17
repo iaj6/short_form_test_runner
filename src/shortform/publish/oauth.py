@@ -11,13 +11,25 @@ SDKs would add a large transitive dependency tree to a project whose runtime
 deps are otherwise slim. Same reasoning as the rest of this codebase preferring
 a subprocess to a heavyweight client.
 
-IMPORTANT — the 7-day refresh token trap:
-    While the OAuth consent screen in Google Cloud Console is in "Testing"
-    publishing status, Google expires refresh tokens after 7 days and every
-    upload starts failing with invalid_grant. Set the consent screen to
-    "In production" for a non-expiring token. An unverified production app
-    still works — you get a warning screen on the consent page (Advanced ->
-    Go to <app> (unsafe)) and a 100-user cap, which is 99 more than this needs.
+TWO TRAPS, both caused by the consent screen being in "Testing" status.
+Console: APIs & Services -> OAuth consent screen (newer UI: Google Auth
+Platform -> Audience). Clicking PUBLISH APP fixes both at once.
+
+1. "Error 403: access_denied ... can only be accessed by developer-approved
+   testers", at the consent page, before you get anywhere. The account you're
+   signing in with isn't on the Test users list. Either publish the app, or add
+   the account under Test users.
+
+2. invalid_grant on an upload roughly a week later. While in Testing, Google
+   expires refresh tokens after 7 days, so a flow that worked on Monday fails
+   on the following Tuesday. Only publishing fixes this one — adding a test
+   user does not.
+
+Publishing does NOT require passing Google verification. `youtube.upload` is a
+sensitive scope, so the console will say verification is needed for public use;
+an unverified production app still works, showing a warning screen on the
+consent page (Advanced -> Go to <app> (unsafe)) with a 100-user cap, which is
+99 more than this needs.
 """
 
 from __future__ import annotations
